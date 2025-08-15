@@ -1,4 +1,4 @@
-# ACC Activity Dashboard — Folder picker + plain-text URL from Targets col C
+# ACC Activity Dashboard — Dark-mode aware + PDF export + folder scanner
 # - Scans ./Data for project workbooks (shows only file title, no .xlsx/date)
 # - Reads URL from Targets sheet (column named URL/Link/Href, or 3rd column)
 # - ZERO-VIEW plans panel (category filters apply; member filter does not)
@@ -14,7 +14,7 @@ import math
 import hashlib
 from io import BytesIO
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import pandas as pd
 import streamlit as st
@@ -37,39 +37,85 @@ try:
 except Exception:
     HAS_PDF = False
 
-# ---------- BRAND / THEME ----------
-PRIMARY = "#254467"   # header blue
-ACCENT  = "#f26e21"   # Hermosillo orange
-BG      = "#f5f5f5"   # light background
-
+# ---------- BRAND / THEME (Light/Dark aware) ----------
 st.set_page_config(page_title="Core Innovation - ACC Activity Analysis — HMO MTY",
                    page_icon="📌", layout="wide")
 
+# Theme choice: Auto = follow Streamlit/OS theme; or force Light/Dark
+theme_choice = st.session_state.get("theme_choice", "Auto")
+theme_choice = st.sidebar.selectbox("Appearance", ["Auto", "Light", "Dark"],
+                                    index=["Auto", "Light", "Dark"].index(theme_choice),
+                                    help="Auto follows viewer's Streamlit/OS theme")
+st.session_state["theme_choice"] = theme_choice
+
+def _is_dark_mode(theme_choice: str) -> bool:
+    if theme_choice == "Light": return False
+    if theme_choice == "Dark":  return True
+    base = st.get_option("theme.base")  # "light" / "dark" / None
+    return (str(base).lower() == "dark")
+
+IS_DARK = _is_dark_mode(theme_choice)
+
+# Palettes
+LIGHT = dict(
+    primary="#254467", accent="#f26e21", accent2="#22c55e",
+    bg="#f5f5f5", card="#ffffff", text="#1a2b3c", subtext="#5b6b7a",
+    border="rgba(0,0,0,.06)", shadow="0 6px 20px rgba(0,0,0,.06)", invert_logo="invert(1)"
+)
+DARK = dict(
+    primary="#0f2439", accent="#f26e21", accent2="#38bdf8",
+    bg="#0f172a", card="#111827", text="#e5e7eb", subtext="#94a3b8",
+    border="rgba(255,255,255,.10)", shadow="0 8px 28px rgba(0,0,0,.55)", invert_logo="none"
+)
+C = DARK if IS_DARK else LIGHT
+
+# Expose these to rest of code
+PRIMARY, ACCENT, BG = C["primary"], C["accent"], C["bg"]
+
+# Plotly theme + palette
+px.defaults.template = "plotly_dark" if IS_DARK else "plotly_white"
+px.defaults.color_discrete_sequence = [C["accent"], C["accent2"], C["primary"]]
+
 CUSTOM_CSS = f"""
 <style>
+/* Hide Streamlit chrome bar */
 header {{ display: none !important; }}
 div[data-testid="stToolbar"], div[data-testid="stDecoration"], div[data-testid="stStatusWidget"] {{ display:none!important; }}
 #MainMenu, footer {{ visibility: hidden; }}
-.stApp {{ background: {BG}; }}
+
+/* App BG */
+.stApp {{ background: {C['bg']}; color: {C['text']}; }}
+
+/* Header bar */
 .header-bar {{
-  width:100%; background:{PRIMARY}; color:white; padding:14px 20px; display:flex; align-items:center;
-  justify-content:space-between; gap:16px; border-radius:12px; box-shadow:0 4px 16px rgba(0,0,0,.12); margin:0 0 18px 0;
+  width:100%; background:{C['primary']}; color:white; padding:14px 20px;
+  display:flex; align-items:center; justify-content:space-between; gap:16px;
+  border-radius:12px; box-shadow:{C['shadow']}; margin:0 0 18px 0;
 }}
 .header-bar .title {{ font-size:20px; font-weight:700; text-align:center; flex:1 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
 .header-logo {{ height:36px; flex:0 0 auto; }}
-.right-logo {{ filter: invert(1); }}
+.right-logo {{ filter: {C['invert_logo']}; }}
+
+/* Cards & chips */
 .metric-card {{
-  background:white; border-radius:16px; padding:16px 18px; border:1px solid rgba(0,0,0,.06); box-shadow:0 6px 20px rgba(0,0,0,.06);
+  background:{C['card']}; border-radius:16px; padding:16px 18px;
+  border:1px solid {C['border']}; box-shadow:{C['shadow']};
 }}
-.metric-label {{ font-size:12px; color:#5b6b7a; text-transform:uppercase; letter-spacing:.06em; margin-bottom:6px; }}
-.metric-value {{ font-size:26px; font-weight:800; color:#1a2b3c; }}
-.section-chip {{ display:inline-block; background:{ACCENT}; color:white; padding:6px 12px; border-radius:999px; font-weight:600; font-size:12px; letter-spacing:.02em; margin:6px 0 10px 0; }}
+.metric-label {{ font-size:12px; color:{C['subtext']}; text-transform:uppercase; letter-spacing:.06em; margin-bottom:6px; }}
+.metric-value {{ font-size:26px; font-weight:800; color:{C['text']}; }}
+.section-chip {{
+  display:inline-block; background:{C['accent']}; color:white; padding:6px 12px; border-radius:999px; font-weight:600; font-size:12px; letter-spacing:.02em; margin:6px 0 10px 0;
+}}
+
+/* Zero-view cards */
 .plan-grid {{ display:grid; grid-template-columns:repeat(auto-fill,minmax(280px,1fr)); gap:8px; margin-top:6px; }}
-.plan-card {{ background:white; border:1px solid rgba(0,0,0,.08); border-radius:10px; padding:8px 10px; box-shadow:0 4px 12px rgba(0,0,0,.05); }}
-.plan-card a {{ color:{PRIMARY}; font-weight:600; text-decoration:none; }}
+.plan-card {{ background:{C['card']}; border:1px solid {C['border']}; border-radius:10px; padding:8px 10px; box-shadow:{C['shadow']}; }}
+.plan-card a {{ color:{C['primary']}; font-weight:600; text-decoration:none; }}
 .plan-card a:hover {{ text-decoration:underline; }}
-.plan-card .cat {{ display:inline-block; margin-top:4px; font-size:12px; color:#5b6b7a; }}
-.small-list li {{ margin: 4px 0; }}
+.plan-card .cat {{ display:inline-block; margin-top:4px; font-size:12px; color:{C['subtext']}; }}
+
+/* Streamlit tables/lists */
+.small-list li {{ margin: 4px 0; color:{C['text']}; }}
 </style>
 """
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
@@ -146,13 +192,16 @@ def _normalize_cleaned_columns(df: pd.DataFrame) -> pd.DataFrame:
 # ---------- Targets from sheet (URL in text, column C) ----------
 def _get_targets_from_sheet_with_url(tdf: pd.DataFrame) -> pd.DataFrame:
     cols = list(tdf.columns)
+
     # Detect item/title column
     item_col = None
     for c in cols:
         cl = str(c).strip().lower()
         if any(k in cl for k in ["item", "name", "title", "file", "document", "sheet"]):
             item_col = c; break
-    if item_col is None: item_col = cols[0]
+    if item_col is None:
+        item_col = cols[0]  # fallback first column
+
     # Detect folder column
     folder_col = None
     for cand in ["folder", "category", "discipline"]:
@@ -160,22 +209,28 @@ def _get_targets_from_sheet_with_url(tdf: pd.DataFrame) -> pd.DataFrame:
             if cand == str(c).strip().lower():
                 folder_col = c; break
         if folder_col is not None: break
-    if folder_col is None: folder_col = cols[1] if len(cols) >= 2 else None
+    if folder_col is None:
+        folder_col = cols[1] if len(cols) >= 2 else None
+
     # Detect URL column
     url_col = None
     for c in cols:
         cl = str(c).strip().lower()
         if cl in ("url", "link", "href"): url_col = c; break
-    if url_col is None and len(cols) >= 3: url_col = cols[2]
+    if url_col is None and len(cols) >= 3:
+        url_col = cols[2]  # fallback to third column
+
     out = pd.DataFrame()
     out["target_item"] = tdf[item_col].astype(str).str.strip()
     out["target_folder"] = (tdf[folder_col].astype(str).str.strip() if folder_col is not None else "Uncategorized")
+
     if url_col is not None:
         urls = tdf[url_col].astype(str).str.strip()
         urls = urls.where(urls.replace({"": None, "nan": None, "None": None}).notna(), None)
         out["target_url"] = urls
     else:
         out["target_url"] = None
+
     out["mark"] = out["target_item"].apply(_derive_mark)
     out = out[out["mark"] != ""]
     out["__has_url__"] = out["target_url"].notna() & (out["target_url"] != "")
@@ -294,7 +349,7 @@ with st.expander("Filters", expanded=True):
     else:
         targets_df = None
 
-    # If no Targets sheet, allow paste/upload fallback
+    # If no Targets sheet, allow paste/upload fallback (URLs optional)
     if targets_df is None or targets_df.empty:
         st.info("No 'Targets' sheet found. You can still paste or upload targets (URLs optional).")
         example = "DFS-SEN-A705 - SPECIFICATIONS SCHEDULES - LOBBY | Arquitectonico | https://example.com/docA\nDFS-SEN-C103 - TRACE PLAN - GRIDS & SIDEWALKS | Civil | https://example.com/docB"
@@ -393,9 +448,9 @@ def _attach_urls(summary_df: pd.DataFrame, targets: pd.DataFrame) -> pd.DataFram
          .rename(columns={"mark":"matched_mark","target_folder":"matched_folder"}))
     return summary_df.merge(m, on=["matched_mark","matched_folder"], how="left").rename(columns={"target_url":"url"})
 
-summary_all       = _attach_urls(summary_all, targets_df)
+summary_all         = _attach_urls(summary_all, targets_df)
 reviews_summary_all = _attach_urls(reviews_summary_all, targets_df) if not reviews_summary_all.empty else reviews_summary_all
-summary_all_full  = _attach_urls(summary_all_full, targets_df)
+summary_all_full    = _attach_urls(summary_all_full, targets_df)
 
 # View-count slider (applies to member-filtered summary)
 actual_max = int(summary_all["view_count"].max()) if not summary_all.empty else 0
@@ -423,9 +478,6 @@ def _display_label(lbl: str) -> str:
 
 def _display_member(name: str) -> str:
     return _pseudonym(name) if privacy_mode else name
-
-px.defaults.template = "plotly_white"
-px.defaults.color_discrete_sequence = [ACCENT, PRIMARY, "#7a8a9a"]
 
 # ============================
 # Views — Distribution (ALL; optional cap + sorting)
@@ -512,7 +564,7 @@ if not summary.empty:
         total = len(ranked)
         total_pages = max(1, math.ceil(total / page_size))
 
-        # Put the page slider on the last page by default
+        # Put the page slider on the last page by default (sticky thereafter)
         default_page = st.session_state.get("viewer_page_slider", total_pages)
         default_page = min(max(1, default_page), total_pages)
         page = st.slider("Rank range (page)", min_value=1, max_value=total_pages,
@@ -616,29 +668,34 @@ if not summary.empty and not viewers.empty:
                                     "count": st.column_config.NumberColumn("Count", format="%d"),
                                     "mark": "Mark", "category": "Category"})
 
+# -----------------------------
 # Exports (CSV)
-def _maybe_mask(df_export: pd.DataFrame) -> pd.DataFrame:
-    if not privacy_mode or not apply_privacy_to_downloads: return df_export
+# -----------------------------
+@st.cache_data
+def _csv_download_bytes(df_export: pd.DataFrame, privacy: bool, mask_exports: bool) -> bytes:
     df = df_export.copy()
-    if "Mark [Category]" in df.columns: df["Mark [Category]"] = df["Mark [Category]"].map(_display_label)
-    if "Member" in df.columns: df["Member"] = df["Member"].map(_pseudonym)
-    return df
+    if privacy and mask_exports:
+        if "Mark [Category]" in df.columns:
+            df["Mark [Category]"] = df["Mark [Category]"].map(_display_label)
+        if "Member" in df.columns:
+            df["Member"] = df["Member"].map(_pseudonym)
+    return df.to_csv(index=False).encode("utf-8")
 
 st.download_button("Download Views Summary CSV",
-                   data=_to_csv_bytes(_maybe_mask(display_df)),
+                   data=_csv_download_bytes(display_df, privacy_mode, apply_privacy_to_downloads),
                    file_name="targets_mark_views_summary.csv", mime="text/csv")
 
 zeros_full = summary_all[summary_all["view_count"] == 0][["label","view_count","min","max","url"]] \
     .rename(columns={"label":"Mark [Category]","url":"Open Plan"})
 st.download_button("Download Zero-View Targets CSV",
-                   data=_to_csv_bytes(_maybe_mask(zeros_full)),
+                   data=_csv_download_bytes(zeros_full, privacy_mode, apply_privacy_to_downloads),
                    file_name="targets_mark_zero_views.csv", mime="text/csv")
 
 if not reviews_summary_all.empty:
     reviews_disp = reviews_summary_all[["label","review_count","min","max","url"]].rename(
         columns={"label":"Mark [Category]","review_count":"Reviews started","url":"Open Plan"})
     st.download_button("Download Reviews Started CSV",
-                       data=_to_csv_bytes(_maybe_mask(reviews_disp)),
+                       data=_csv_download_bytes(reviews_disp, privacy_mode, apply_privacy_to_downloads),
                        file_name="targets_mark_reviews_started.csv", mime="text/csv")
 
 # -----------------------------
@@ -668,12 +725,12 @@ def build_pdf(project_name: str,
     c = canvas.Canvas(buf, pagesize=letter)
     W, H = letter
 
-    def title(txt): 
+    def title(txt):
         c.setFont("Helvetica-Bold", 14); c.drawString(40, H-60, txt)
 
     def chip(y, label):
         c.setFillColorRGB(0.949, 0.431, 0.129)  # ACCENT
-        c.roundRect(40, y-16, 180, 18, 6, fill=True, stroke=False)
+        c.roundRect(40, y-16, 220, 18, 6, fill=True, stroke=False)
         c.setFillColorRGB(1,1,1); c.setFont("Helvetica-Bold", 9); c.drawString(48, y-12, label)
         c.setFillColorRGB(0,0,0)
 
