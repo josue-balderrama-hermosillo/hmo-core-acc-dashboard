@@ -1,0 +1,8 @@
+streamlit
+reportlab
+kaleido
+pandas
+plotly
+openpyxl        # XLSX support
+flashtext       # fast keyword search mode
+pyarrow         # Parquet support (optional but fast)
