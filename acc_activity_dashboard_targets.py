@@ -1,6 +1,6 @@
-# ACC Activity Dashboard — Project Title Dropdown + Reset-on-change
+# ACC Activity Dashboard — Project Title Dropdown (Hermosillo orange) + Reset-on-change
 # - Sticky header with logos
-# - NEW: Project "title" select (dropdown) visible at top
+# - Big orange Project selector (works like a title) under header
 # - Auto-reset filters when switching projects
 # - Parquet sidecar cache, fast aggregates, CSV exports, print-to-PDF of current view
 # Run:
@@ -74,10 +74,26 @@ div.block-container {{ padding-top: 0.35rem !important; padding-bottom: 0.8rem; 
 .header-logo {{ height:32px; flex:0 0 auto; }}
 .right-logo {{ filter: invert(1) !important; }}
 
-.project-chooser {{
-  display:flex; justify-content:center; margin: 2px 0 6px 0;
+/* Project title row */
+.project-chooser {{ display:flex; justify-content:center; margin: 2px 0 8px 0; }}
+.project-chooser .hint {{ text-align:center; font-size:12px; color:{C['subtext']}; margin-bottom:2px; text-transform:uppercase; letter-spacing:.06em; font-weight:700; }}
+
+/* 🔶 Make the FIRST selectbox right after our marker look like a big orange title */
+.project-chooser-marker + div [data-testid="stSelectbox"]:first-of-type div[data-baseweb="select"] > div {{
+  background: {C['accent']};
+  border: 2px solid {C['accent']};
+  border-radius: 18px;
+  min-height: 56px;
+  box-shadow: {C['shadow']};
 }}
-.project-chooser .hint {{ text-align:center; font-size:12px; color:{C['subtext']}; margin-bottom:2px; }}
+.project-chooser-marker + div [data-testid="stSelectbox"]:first-of-type div[data-baseweb="select"] > div > div {{
+  color: #ffffff;
+  font-weight: 800;
+  font-size: 22px;
+}}
+.project-chooser-marker + div [data-testid="stSelectbox"]:first-of-type svg {{
+  fill: #ffffff;
+}}
 
 .top-controls {{
   position: sticky; top: 56px; z-index: 1000;
@@ -484,12 +500,16 @@ if st.session_state["_last_project_key"] != project_key:
     st.session_state["viewer_page_size"] = 50
     st.session_state["viewer_metric"] = "Total interactions"
     st.session_state["_last_project_key"] = project_key
-    # Note: don't rerun here yet; we want to render the dropdown first
+    # (no rerun here; we want to render the dropdown first)
 
 # =========================
-# NEW: PROJECT TITLE DROPDOWN (visible control)
+# NEW: PROJECT TITLE DROPDOWN (visible control, big + orange)
 # =========================
 st.markdown('<div class="project-chooser"><div class="hint">Project</div></div>', unsafe_allow_html=True)
+
+# Marker so CSS can target only THIS selectbox and make it big + orange
+st.markdown('<div class="project-chooser-marker"></div>', unsafe_allow_html=True)
+
 c1, c2, c3 = st.columns([1, 3, 1])
 with c2:
     pick = st.selectbox(
@@ -502,9 +522,9 @@ with c2:
         help="Switch project workbook",
     )
     if pick != sel_idx:
-        # Update selection and force a clean reset on next cycle
         st.session_state["selected_project_index"] = int(pick)
-        st.session_state["_last_project_key"] = ""   # triggers reset block above
+        # trigger full reset on next rerun (prevents stale filters)
+        st.session_state["_last_project_key"] = ""
         st.rerun()
 
 # =========================
