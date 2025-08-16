@@ -1,4 +1,5 @@
-# ACC Activity Dashboard — top toolbar (Filters+Export), fixed dialog Close, print-to-PDF (exact view), footer
+# ACC Activity Dashboard — top toolbar (Export left of Filters), fixed dialog Close,
+# exact print-to-PDF (what you see), footer, robust URL joins
 # Run:
 #   pip install -r requirements.txt
 #   streamlit run acc_activity_dashboard_targets.py
@@ -72,7 +73,7 @@ div.block-container {{ padding-top: 0.35rem !important; padding-bottom: 0.8rem; 
 .header-logo {{ height:32px; flex:0 0 auto; }}
 .right-logo {{ filter: invert(1) !important; }} /* APS always white */
 
-/* Sticky top toolbar (Dark toggle + Filters + Export) — placed right under header */
+/* Sticky top toolbar (Dark toggle + Export + Filters) — placed right under header */
 .top-controls {{
   position: sticky; top: 56px; z-index: 1000;   /* sits right below header */
   display:flex; justify-content:flex-end; gap:8px; margin: 4px 0 8px 0;
@@ -155,6 +156,8 @@ if "views_sort_choice" not in st.session_state:
     st.session_state["views_sort_choice"] = "Alphabetical"
 if "viewer_page_slider" not in st.session_state:
     st.session_state["viewer_page_slider"] = 1
+if "views_slider" not in st.session_state:
+    st.session_state["views_slider"] = (0, 0)  # will be reset after data load
 
 # ---------- IO / NORMALIZATION ----------
 @st.cache_data(show_spinner=False)
@@ -365,7 +368,7 @@ def _filters_dialog(files: List[Path],
         if st.button("Close", use_container_width=True):
             st.rerun()  # actually closes dialog
 
-# --------------------- LOAD & COMPUTE FIRST (so toolbar exports know current data) ---------------------
+# --------------------- LOAD & COMPUTE (so toolbar exports know current data) ---------------------
 files = _list_projects()
 if not files:
     st.warning(f"No .xlsx files found in {DATA_DIR}. Add workbooks with 'Data Source' & 'Targets'.")
@@ -424,10 +427,19 @@ if not dfm_reviews.empty:
 else:
     reviews_summary_all = pd.DataFrame(columns=["matched_mark","matched_folder","review_count","min","max","label"])
 
+# Build a reusable label->URL lookup for later joins
+if targets_df.empty:
+    url_lookup = pd.DataFrame(columns=["label", "target_url"])
+else:
+    url_lookup = (targets_df
+                  .assign(label=targets_df["mark"] + " [" + targets_df["target_folder"] + "]")
+                  [["label", "target_url"]]
+                  .drop_duplicates())
+
 # Slider defaults (so top Export popover can compute filtered output right away)
 actual_max = int(summary_all["view_count"].max()) if not summary_all.empty else 0
 slider_max = max(actual_max, 1)
-if "views_slider" not in st.session_state:
+if st.session_state["views_slider"] == (0, 0):
     st.session_state["views_slider"] = (0, actual_max)
 
 def _filtered_summary(_rng):
@@ -435,28 +447,23 @@ def _filtered_summary(_rng):
     s = summary_all[(summary_all["view_count"] >= vmin) & (summary_all["view_count"] <= vmax)]
     return s
 
-# ---------- TOP TOOLBAR (dark toggle + filters + export) RIGHT BELOW HEADER ----------
+# ---------- TOP TOOLBAR (right under header; Export left of Filters) ----------
 st.markdown('<div class="top-controls"></div>', unsafe_allow_html=True)
-ctA, ctB, ctC = st.columns([7,1,1], vertical_alignment="center")
+
+# Export just to the left of Filters
+ctA, ctB, ctC = st.columns([8.5, 0.8, 0.8], vertical_alignment="center")  # A = dark toggle, B = Export, C = Filters
+
 with ctA:
     dark_now = st.toggle("🌙 Dark mode", value=IS_DARK, key="dark_mode", help="Force dark theme on/off")
     if dark_now != IS_DARK:
         st.rerun()
+
+# EXPORT (left of Filters)
 with ctB:
-    if st.button("☰ Filters", key="open_filters_btn"):
-        _filters_dialog(
-            files=files,
-            current_idx=st.session_state["selected_project_index"],
-            current_categories_default=st.session_state["picked_categories"],
-            current_members_default=st.session_state["selected_members"],
-            current_match=st.session_state["match_mode"],
-            current_privacy=st.session_state["privacy_mode"],
-        )
-with ctC:
     with st.popover("⬇️ Export", use_container_width=True):
         st.caption("Exact view:")
         if st.button("🖨️ Print / Save as PDF", use_container_width=True):
-            # Trigger top-level print (not the iframe) to avoid blank page
+            # Trigger top-level print (not iframe) to avoid blank page
             components.html("""
                 <script>
                   (function(){
@@ -468,40 +475,30 @@ with ctC:
         st.divider()
         st.caption("Downloads (CSV):")
 
-        # Build CSV frames using current filtered range from session state
+        # --- Build CSV frames using current filtered range from session state ---
         _rng = st.session_state["views_slider"]
         summary_now = _filtered_summary(_rng)
 
-        display_df_pop = summary_now[["label","view_count","min","max"]].copy()
-        # Attach URL
-        if "target_url" in targets_df.columns:
-            url_map = (targets_df[["mark","target_folder","target_url"]]
-                       .drop_duplicates().rename(columns={"mark":"matched_mark","target_folder":"matched_folder"}))
-            display_df_pop = display_df_pop.merge(url_map, left_on=["label"],
-                                                  right_on=[(summary_all["matched_mark"] + " [" + summary_all["matched_folder"] + "]").name],
-                                                  how="left")
-        display_df_pop = display_df_pop.rename(columns={"label":"Mark [Category]","target_url":"Open Plan"})
-        display_df_pop["Mark [Category]"] = display_df_pop["Mark [Category]"]
+        # Views summary (with URL)
+        display_df_pop = summary_now[["label", "view_count", "min", "max"]].copy()
+        if not url_lookup.empty:
+            display_df_pop = display_df_pop.merge(url_lookup, on="label", how="left")
+        display_df_pop = display_df_pop.rename(columns={"label":"Mark [Category]", "target_url":"Open Plan"})
 
+        # Zero-view (overall)
         zeros_full_pop = summary_all[summary_all["view_count"] == 0][["label","view_count","min","max"]].copy()
-        if "target_url" in targets_df.columns:
-            url_map2 = (targets_df[["mark","target_folder","target_url"]]
-                       .drop_duplicates().rename(columns={"mark":"matched_mark","target_folder":"matched_folder"}))
-            zeros_full_pop = zeros_full_pop.merge(url_map2, left_on=["label"],
-                                                  right_on=[(summary_all["matched_mark"] + " [" + summary_all["matched_folder"] + "]").name],
-                                                  how="left")
-        zeros_full_pop = zeros_full_pop.rename(columns={"label":"Mark [Category]","target_url":"Open Plan"})
+        if not url_lookup.empty:
+            zeros_full_pop = zeros_full_pop.merge(url_lookup, on="label", how="left")
+        zeros_full_pop = zeros_full_pop.rename(columns={"label":"Mark [Category]", "target_url":"Open Plan"})
 
+        # Reviews started
         if not reviews_summary_all.empty:
             reviews_disp = reviews_summary_all[["label","review_count","min","max"]].copy()
-            if "target_url" in targets_df.columns:
-                url_map3 = (targets_df[["mark","target_folder","target_url"]]
-                            .drop_duplicates().rename(columns={"mark":"matched_mark","target_folder":"matched_folder"}))
-                reviews_disp = reviews_disp.merge(url_map3,
-                                                  left_on=["label"],
-                                                  right_on=[(reviews_summary_all["matched_mark"] + " [" + reviews_summary_all["matched_folder"] + "]").name],
-                                                  how="left")
-            reviews_disp = reviews_disp.rename(columns={"label":"Mark [Category]","review_count":"Reviews started","target_url":"Open Plan"})
+            if not url_lookup.empty:
+                reviews_disp = reviews_disp.merge(url_lookup, on="label", how="left")
+            reviews_disp = reviews_disp.rename(columns={"label":"Mark [Category]",
+                                                        "review_count":"Reviews started",
+                                                        "target_url":"Open Plan"})
         else:
             reviews_disp = pd.DataFrame(columns=["Mark [Category]","Reviews started","min","max","Open Plan"])
 
@@ -531,6 +528,18 @@ with ctC:
             st.download_button("Reviews Started CSV",
                                data=_csv_bytes(reviews_disp, mask_exports),
                                file_name="targets_mark_reviews_started.csv", mime="text/csv", use_container_width=True)
+
+# FILTERS (rightmost)
+with ctC:
+    if st.button("☰ Filters", key="open_filters_btn"):
+        _filters_dialog(
+            files=files,
+            current_idx=st.session_state["selected_project_index"],
+            current_categories_default=st.session_state["picked_categories"],
+            current_members_default=st.session_state["selected_members"],
+            current_match=st.session_state["match_mode"],
+            current_privacy=st.session_state["privacy_mode"],
+        )
 
 # --------------------- SLIDER & KPIs (below toolbar) ---------------------
 view_min, view_max = st.slider("Views between", 0, slider_max, st.session_state["views_slider"], key="views_slider")
@@ -613,8 +622,7 @@ if not summary.empty:
     st.markdown('<span class="section-chip">Viewers — Ranked (paged)</span>', unsafe_allow_html=True)
 
     allowed = set(summary["label"].tolist())
-    v2 = _build_mark_summary(dfm_views, targets_df)[1]  # viewers
-    v2 = v2[v2["label"].isin(allowed)].copy()
+    v2 = viewers[viewers["label"].isin(allowed)].copy()
 
     distinct_by_member = v2.groupby("Member")["label"].nunique().rename("distinct_items").reset_index()
     total_interactions_by_member = v2.groupby("Member")["count"].sum().rename("total_interactions").reset_index()
@@ -663,7 +671,12 @@ if not summary.empty:
                     st.caption(f"{title}: none"); return
                 items = []
                 for _, r in df_.iterrows():
-                    text = _display_label(r["label"]); vc = int(r["view_count"]); url = r.get("url", None)
+                    text = _display_label(r["label"]); vc = int(r["view_count"])
+                    url = None
+                    if not url_lookup.empty:
+                        m = url_lookup[url_lookup["label"] == r["label"]]
+                        if not m.empty:
+                            url = m["target_url"].iloc[0]
                     if isinstance(url, str) and url.strip():
                         items.append(f'<li><a href="{url}" target="_blank">{text}</a> — <b>{vc}</b></li>')
                     else:
@@ -677,8 +690,10 @@ if not summary.empty:
 # Details — Views
 # ============================
 st.markdown('<span class="section-chip">Details — Views</span>', unsafe_allow_html=True)
-display_df = summary[["label","view_count","min","max","url"]].rename(
-    columns={"label":"Mark [Category]","url":"Open Plan"}).copy()
+display_df = summary[["label","view_count","min","max"]].copy()
+if not url_lookup.empty:
+    display_df = display_df.merge(url_lookup, on="label", how="left")
+display_df = display_df.rename(columns={"label":"Mark [Category]","target_url":"Open Plan"})
 display_df["Mark [Category]"] = display_df["Mark [Category]"].map(_display_label)
 st.dataframe(display_df, use_container_width=True, hide_index=True,
              column_config={"Open Plan": st.column_config.LinkColumn("Open Plan", display_text="Open")})
@@ -687,6 +702,9 @@ st.dataframe(display_df, use_container_width=True, hide_index=True,
 # Zero-view (overall; member filter NOT applied)
 # ============================
 zero_summary = summary_all_full[summary_all_full["view_count"] == 0].copy()
+if not url_lookup.empty and not zero_summary.empty:
+    zero_summary = zero_summary.merge(url_lookup, left_on="label", right_on="label", how="left")
+
 st.markdown('<span class="section-chip">Zero-view plans (clickable)</span>', unsafe_allow_html=True)
 if not zero_summary.empty:
     q = st.text_input("Search a zero-view plan", value="")
@@ -697,7 +715,7 @@ if not zero_summary.empty:
         if isinstance(url, str) and url.strip():
             return f'<div class="plan-card"><a href="{url}" target="_blank">{text}</a><div class="cat">{folder}</div></div>'
         return f'<div class="plan-card"><span>{text}</span><div class="cat">{folder}</div></div>'
-    cards = [_card(r["label"], r["matched_folder"], r.get("url", None)) for _, r in linkable.sort_values("label").iterrows()]
+    cards = [_card(r["label"], r["matched_folder"], r.get("target_url", None)) for _, r in linkable.sort_values("label").iterrows()]
     st.markdown('<div class="plan-grid">' + "".join(cards) + "</div>", unsafe_allow_html=True)
 else:
     st.success("Great! No zero-view plans for the selected categories.")
