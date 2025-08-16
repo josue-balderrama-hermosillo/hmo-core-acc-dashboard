@@ -1,8 +1,8 @@
-# ACC Activity Dashboard — Dark-mode aware + PDF export + folder scanner
+# ACC Activity Dashboard — Dark-mode toggle + Floating Filters dialog + UI polish
 # - Scans ./Data for project workbooks (shows only file title, no .xlsx/date)
 # - Reads URL from Targets sheet (column named URL/Link/Href, or 3rd column)
 # - ZERO-VIEW plans panel (category filters apply; member filter does not)
-# - Viewers — paged line chart (default: Total interactions; page size max; slider on last page)
+# - Viewers — paged line chart (default: Total interactions; FIRST page by default)
 # - Top 10 & Bottom 10 plans (bottom excludes zero-view)
 # - Export full report as PDF (kaleido + reportlab)
 # Run:
@@ -14,14 +14,14 @@ import math
 import hashlib
 from io import BytesIO
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 import pandas as pd
 import streamlit as st
 import plotly.express as px
 import plotly.io as pio
 
-# Optional fast keyword engine (used when you pick "Keyword search (fast)")
+# Optional fast keyword engine
 try:
     from flashtext import KeywordProcessor
     HAS_FLASHTEXT = True
@@ -37,24 +37,15 @@ try:
 except Exception:
     HAS_PDF = False
 
-# ---------- BRAND / THEME (Light/Dark aware) ----------
+# --------------------- PAGE / THEME ---------------------
 st.set_page_config(page_title="Core Innovation - ACC Activity Analysis — HMO MTY",
                    page_icon="📌", layout="wide")
 
-# Theme choice: Auto = follow Streamlit/OS theme; or force Light/Dark
-theme_choice = st.session_state.get("theme_choice", "Auto")
-theme_choice = st.sidebar.selectbox("Appearance", ["Auto", "Light", "Dark"],
-                                    index=["Auto", "Light", "Dark"].index(theme_choice),
-                                    help="Auto follows viewer's Streamlit/OS theme")
-st.session_state["theme_choice"] = theme_choice
+# Make theme deterministic (force Light) with a top toggle to flip to Dark
+if "dark_mode" not in st.session_state:
+    st.session_state["dark_mode"] = False  # default Light for everyone
 
-def _is_dark_mode(theme_choice: str) -> bool:
-    if theme_choice == "Light": return False
-    if theme_choice == "Dark":  return True
-    base = st.get_option("theme.base")  # "light" / "dark" / None
-    return (str(base).lower() == "dark")
-
-IS_DARK = _is_dark_mode(theme_choice)
+IS_DARK = bool(st.session_state["dark_mode"])
 
 # Palettes
 LIGHT = dict(
@@ -68,33 +59,40 @@ DARK = dict(
     border="rgba(255,255,255,.10)", shadow="0 8px 28px rgba(0,0,0,.55)", invert_logo="none"
 )
 C = DARK if IS_DARK else LIGHT
-
-# Expose these to rest of code
 PRIMARY, ACCENT, BG = C["primary"], C["accent"], C["bg"]
 
 # Plotly theme + palette
 px.defaults.template = "plotly_dark" if IS_DARK else "plotly_white"
 px.defaults.color_discrete_sequence = [C["accent"], C["accent2"], C["primary"]]
 
+# Tighten top padding & style
 CUSTOM_CSS = f"""
 <style>
-/* Hide Streamlit chrome bar */
-header {{ display: none !important; }}
+/* Kill Streamlit chrome + reduce top padding/whitespace */
+header {{ display:none !important; }}
 div[data-testid="stToolbar"], div[data-testid="stDecoration"], div[data-testid="stStatusWidget"] {{ display:none!important; }}
-#MainMenu, footer {{ visibility: hidden; }}
-
-/* App BG */
-.stApp {{ background: {C['bg']}; color: {C['text']}; }}
+#MainMenu, footer {{ visibility:hidden; }}
+.stApp {{ background:{C['bg']}; color:{C['text']}; }}
+/* Tight top padding */
+section[data-testid="stMain"] > div:first-child {{ padding-top: 6px !important; }}
+div.block-container {{ padding-top: 0.35rem !important; padding-bottom: 0.8rem; }}
 
 /* Header bar */
 .header-bar {{
-  width:100%; background:{C['primary']}; color:white; padding:14px 20px;
-  display:flex; align-items:center; justify-content:space-between; gap:16px;
-  border-radius:12px; box-shadow:{C['shadow']}; margin:0 0 18px 0;
+  position: sticky; top: 4px; z-index: 1000;
+  width:100%; background:{C['primary']}; color:white; padding:12px 16px;
+  display:flex; align-items:center; justify-content:space-between; gap:12px;
+  border-radius:12px; box-shadow:{C['shadow']}; margin:0 0 10px 0;
 }}
 .header-bar .title {{ font-size:20px; font-weight:700; text-align:center; flex:1 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
-.header-logo {{ height:36px; flex:0 0 auto; }}
+.header-logo {{ height:32px; flex:0 0 auto; }}
 .right-logo {{ filter: {C['invert_logo']}; }}
+
+/* Small top controls bar (sticky) */
+.top-controls {{
+  position: sticky; top: 8px; z-index: 1000;
+  display:flex; justify-content:flex-end; gap:8px; margin-bottom: 6px;
+}}
 
 /* Cards & chips */
 .metric-card {{
@@ -114,13 +112,16 @@ div[data-testid="stToolbar"], div[data-testid="stDecoration"], div[data-testid="
 .plan-card a:hover {{ text-decoration:underline; }}
 .plan-card .cat {{ display:inline-block; margin-top:4px; font-size:12px; color:{C['subtext']}; }}
 
-/* Streamlit tables/lists */
-.small-list li {{ margin: 4px 0; color:{C['text']}; }}
+/* Lists */
+.small-list li {{ margin:4px 0; color:{C['text']}; }}
+
+/* Make the two small buttons compact */
+button[kind="secondary"] {{ padding: 0.25rem 0.6rem !important; }}
 </style>
 """
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
-# ---------- HEADER WITH LOGOS ----------
+# ---------- HEADER ----------
 left_logo = "https://hermosillo.com/wp-content/uploads/2021/08/horizontal-hermosillo-experience-matters-white-font.webp"
 right_logo = "https://cdn.autodesk.io/logo/black/stacked.png"
 st.markdown(
@@ -134,7 +135,7 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-# ---------- Paths & IO ----------
+# ---------- FILES & STATE DEFAULTS ----------
 def _base_dir() -> Path:
     try:
         return Path(__file__).resolve().parent
@@ -147,13 +148,24 @@ def _list_projects() -> List[Path]:
     DATA_DIR.mkdir(exist_ok=True)
     return sorted(DATA_DIR.glob("*.xlsx"))
 
-def _derive_mark(text: str) -> str:
-    if not isinstance(text, str): return ""
-    s = str(text).strip()
-    if " - " in s: s = s.split(" - ", 1)[0]
-    else: s = s.split()[0] if s else ""
-    return s
+if "selected_project_index" not in st.session_state:
+    st.session_state["selected_project_index"] = 0
+if "picked_categories" not in st.session_state:
+    st.session_state["picked_categories"] = None  # None = all in current project
+if "selected_members" not in st.session_state:
+    st.session_state["selected_members"] = []
+if "match_mode" not in st.session_state:
+    st.session_state["match_mode"] = "Starts with (fast)"
+if "privacy_mode" not in st.session_state:
+    st.session_state["privacy_mode"] = False
+if "mask_csv" not in st.session_state:
+    st.session_state["mask_csv"] = False
+if "views_sort_choice" not in st.session_state:
+    st.session_state["views_sort_choice"] = "Alphabetical"  # default as requested
+if "viewer_page_slider" not in st.session_state:
+    st.session_state["viewer_page_slider"] = 1  # first page by default
 
+# ---------- IO / NORMALIZATION ----------
 @st.cache_data(show_spinner=False)
 def _read_any(file_bytes: bytes, filename: str):
     name = filename.lower()
@@ -166,6 +178,13 @@ def _read_any(file_bytes: bytes, filename: str):
 def _read_path(path_str: str, mtime: float):
     p = Path(path_str)
     return _read_any(p.read_bytes(), p.name)
+
+def _derive_mark(text: str) -> str:
+    if not isinstance(text, str): return ""
+    s = str(text).strip()
+    if " - " in s: s = s.split(" - ", 1)[0]
+    else: s = s.split()[0] if s else ""
+    return s
 
 def _normalize_cleaned_columns(df: pd.DataFrame) -> pd.DataFrame:
     if "item_name" not in df.columns and "item_name_file_ext" in df.columns:
@@ -189,59 +208,50 @@ def _normalize_cleaned_columns(df: pd.DataFrame) -> pd.DataFrame:
     except Exception: pass
     return df
 
-# ---------- Targets from sheet (URL in text, column C) ----------
 def _get_targets_from_sheet_with_url(tdf: pd.DataFrame) -> pd.DataFrame:
     cols = list(tdf.columns)
-
-    # Detect item/title column
+    # Item column
     item_col = None
     for c in cols:
         cl = str(c).strip().lower()
         if any(k in cl for k in ["item", "name", "title", "file", "document", "sheet"]):
             item_col = c; break
-    if item_col is None:
-        item_col = cols[0]  # fallback first column
-
-    # Detect folder column
+    if item_col is None: item_col = cols[0]
+    # Folder column
     folder_col = None
     for cand in ["folder", "category", "discipline"]:
         for c in cols:
             if cand == str(c).strip().lower():
                 folder_col = c; break
         if folder_col is not None: break
-    if folder_col is None:
-        folder_col = cols[1] if len(cols) >= 2 else None
-
-    # Detect URL column
+    if folder_col is None: folder_col = cols[1] if len(cols) >= 2 else None
+    # URL column
     url_col = None
     for c in cols:
         cl = str(c).strip().lower()
-        if cl in ("url", "link", "href"): url_col = c; break
+        if cl in ("url","link","href"): url_col = c; break
     if url_col is None and len(cols) >= 3:
-        url_col = cols[2]  # fallback to third column
-
+        url_col = cols[2]
     out = pd.DataFrame()
     out["target_item"] = tdf[item_col].astype(str).str.strip()
     out["target_folder"] = (tdf[folder_col].astype(str).str.strip() if folder_col is not None else "Uncategorized")
-
     if url_col is not None:
         urls = tdf[url_col].astype(str).str.strip()
         urls = urls.where(urls.replace({"": None, "nan": None, "None": None}).notna(), None)
         out["target_url"] = urls
     else:
         out["target_url"] = None
-
     out["mark"] = out["target_item"].apply(_derive_mark)
     out = out[out["mark"] != ""]
     out["__has_url__"] = out["target_url"].notna() & (out["target_url"] != "")
-    out = out.sort_values(["mark", "target_folder", "__has_url__"], ascending=[True, True, False]) \
-             .drop_duplicates(subset=["mark", "target_folder"], keep="first") \
+    out = out.sort_values(["mark","target_folder","__has_url__"], ascending=[True,True,False]) \
+             .drop_duplicates(subset=["mark","target_folder"], keep="first") \
              .drop(columns="__has_url__")
     out["label"] = out["mark"] + " [" + out["target_folder"] + "]"
     out["mark_len"] = out["mark"].str.len()
     return out
 
-# --------- MATCHERS ---------
+# --------- MATCHERS ----------
 def _assign_marks_prefix(df: pd.DataFrame, targets: pd.DataFrame) -> pd.DataFrame:
     if df.empty or targets.empty:
         out = df.copy(); out["matched_mark"]=out["matched_folder"]=out["matched_label"]=""; return out
@@ -310,7 +320,6 @@ def _build_mark_summary(df_with_matches: pd.DataFrame, targets: pd.DataFrame):
 def _to_csv_bytes(d: pd.DataFrame) -> bytes:
     return d.to_csv(index=False).encode("utf-8")
 
-# ---------- Privacy helpers ----------
 def _mask_middle(text: str, keep_left: int = 3, keep_right: int = 2) -> str:
     s = str(text)
     if len(s) <= keep_left + keep_right: return "•"*len(s)
@@ -321,91 +330,115 @@ def _pseudonym(name: str) -> str:
     h = hashlib.sha1(name.encode("utf-8")).hexdigest()[:6].upper()
     return f"User-{h}"
 
-# ---------- Filters ----------
-with st.expander("Filters", expanded=True):
-    st.markdown(f"**Project workbook** (from `{DATA_DIR}`)")
-    files = _list_projects()
+# --------------------- FILTERS DIALOG ---------------------
+@st.experimental_dialog("Filters")
+def _filters_dialog(files: List[Path],
+                    current_idx: int,
+                    current_categories_default: List[str] | None,
+                    current_members_default: List[str],
+                    current_match: str,
+                    current_privacy: bool):
+    st.caption("Choose a project and refine filters. Changes apply when you click **Apply**.")
     if not files:
-        st.warning(f"No .xlsx files found in {DATA_DIR}. Add workbooks with 'Data Source' & 'Targets'.")
-        st.stop()
+        st.error("No .xlsx files in Data/. Add a workbook first."); return
 
-    choice = st.selectbox("Select a project", options=files, format_func=lambda p: p.stem, index=0)
-    selected_path = choice
+    sel_idx = st.selectbox("Project workbook", options=list(range(len(files))),
+                           format_func=lambda i: files[i].stem, index=min(current_idx, len(files)-1))
 
-    raw = _read_path(str(selected_path), selected_path.stat().st_mtime)
-    if not isinstance(raw, dict) or "Data Source" not in raw:
-        st.error("Workbook must contain a sheet named **Data Source**.")
-        st.stop()
-    sheets: Dict[str, pd.DataFrame] = raw
+    # Read the selected workbook to populate categories & members
+    wb = _read_path(str(files[sel_idx]), files[sel_idx].stat().st_mtime)
+    if not isinstance(wb, dict) or "Data Source" not in wb:
+        st.error("Workbook must contain a sheet named **Data Source**."); return
 
-    # Keep an unfiltered copy for "overall zero-view" computation
-    df_full = _normalize_cleaned_columns(sheets["Data Source"])
-    df = df_full.copy()
-
-    # Build targets with URL from sheet
-    if "Targets" in sheets:
-        targets_df = _get_targets_from_sheet_with_url(sheets["Targets"])
-        st.caption(f"Loaded {len(targets_df)} targets from **Targets** sheet" + (" (with URLs)" if targets_df['target_url'].notna().any() else ""))
+    df_tmp = _normalize_cleaned_columns(wb["Data Source"])
+    # Targets (for categories)
+    if "Targets" in wb:
+        tdf = _get_targets_from_sheet_with_url(wb["Targets"])
     else:
-        targets_df = None
+        tdf = pd.DataFrame(columns=["target_item","target_folder","target_url","mark","label","mark_len"])
+    cats = sorted(tdf["target_folder"].unique().tolist()) if not tdf.empty else []
+    default_cats = (current_categories_default if current_categories_default is not None else cats)
 
-    # If no Targets sheet, allow paste/upload fallback (URLs optional)
-    if targets_df is None or targets_df.empty:
-        st.info("No 'Targets' sheet found. You can still paste or upload targets (URLs optional).")
-        example = "DFS-SEN-A705 - SPECIFICATIONS SCHEDULES - LOBBY | Arquitectonico | https://example.com/docA\nDFS-SEN-C103 - TRACE PLAN - GRIDS & SIDEWALKS | Civil | https://example.com/docB"
-        raw_text = st.text_area("Paste targets (Name | Category | URL optional)", value=example, height=120)
-        rows=[]
-        for line in raw_text.splitlines():
-            if not line.strip(): continue
-            parts = [p.strip() for p in line.split("|")]
-            name = parts[0]
-            cat  = parts[1] if len(parts) > 1 and parts[1] else "Uncategorized"
-            url  = parts[2] if len(parts) > 2 and parts[2] else None
-            rows.append({"target_item":name, "target_folder":cat, "target_url":url})
-        if rows:
-            targets_df = pd.DataFrame(rows)
-            targets_df["mark"] = targets_df["target_item"].apply(_derive_mark)
-            targets_df = targets_df[targets_df["mark"]!=""]
-            targets_df["__has_url__"] = targets_df["target_url"].notna() & (targets_df["target_url"]!="")
-            targets_df = targets_df.sort_values(["mark","target_folder","__has_url__"], ascending=[True,True,False]) \
-                                   .drop_duplicates(subset=["mark","target_folder"], keep="first") \
-                                   .drop(columns="__has_url__")
-            targets_df["label"] = targets_df["mark"] + " [" + targets_df["target_folder"] + "]"
-            targets_df["mark_len"] = targets_df["mark"].str.len()
+    picked_cats = st.multiselect("Categories", options=cats, default=default_cats)
 
-    st.markdown("---")
-    if targets_df is not None and not targets_df.empty:
-        categories = sorted(targets_df["target_folder"].unique().tolist())
-        picked_cats = st.multiselect("Categories", options=categories, default=categories)
-        if picked_cats and len(picked_cats) < len(categories):
-            targets_df = targets_df[targets_df["target_folder"].isin(picked_cats)].copy()
+    # Members
+    members = sorted(df_tmp["Member"].dropna().astype(str).unique().tolist()) if not df_tmp.empty else []
+    sel_members = st.multiselect("Members (empty = all)", options=members, default=current_members_default)
 
-    if not df.empty and "Member" in df.columns:
-        members = sorted(df["Member"].dropna().astype(str).unique().tolist())
-        selected_members = st.multiselect("Members (type to search; empty = all)", options=members, default=[])
-        if selected_members:
-            # Apply member filter ONLY to 'df' for charts; keep df_full for zero-view (overall)
-            df = df[df["Member"].astype(str).isin(selected_members)].copy()
+    match_mode = st.selectbox("Matching mode", ["Starts with (fast)", "Keyword search (fast, needs FlashText)", "Contains anywhere (slow)"],
+                              index=["Starts with (fast)","Keyword search (fast, needs FlashText)","Contains anywhere (slow)"].index(current_match))
 
-    match_speed = st.selectbox(
-        "Matching mode (performance)",
-        ["Starts with (fast)", "Keyword search (fast, needs FlashText)", "Contains anywhere (slow)"],
-        index=0
-    )
+    privacy = st.toggle("Privacy mode — blur/mask Members & Item labels", value=current_privacy)
 
-    st.markdown("---")
-    privacy_mode = st.toggle("Privacy mode — blur/mask Members & Item labels", value=False)
-    apply_privacy_to_downloads = st.checkbox("Apply privacy masking to CSV downloads", value=False) if privacy_mode else False
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("Apply", type="primary", use_container_width=True):
+            st.session_state["selected_project_index"] = int(sel_idx)
+            st.session_state["picked_categories"] = picked_cats if picked_cats else None
+            st.session_state["selected_members"] = sel_members
+            st.session_state["match_mode"] = match_mode
+            st.session_state["privacy_mode"] = privacy
+            st.rerun()
+    with c2:
+        st.button("Close", use_container_width=True)
 
-# ---------- Main ----------
-st.markdown('<span class="section-chip">Targets Overview</span>', unsafe_allow_html=True)
-st.title("Tracked Items — Views & Viewers (by Mark)")
+# Top controls (sticky): Dark Mode toggle + Filters button
+controls = st.container()
+with controls:
+    st.markdown('<div class="top-controls"></div>', unsafe_allow_html=True)
+    colA, colB = st.columns([8,1], vertical_alignment="center")
+    with colA:
+        dark_now = st.toggle("🌙 Dark mode", value=IS_DARK, key="dark_mode", help="Force dark theme on/off")
+        if dark_now != IS_DARK:
+            st.experimental_rerun()
+    with colB:
+        if st.button("☰ Filters", key="open_filters_btn"):
+            files = _list_projects()
+            _filters_dialog(
+                files=files,
+                current_idx=st.session_state["selected_project_index"],
+                current_categories_default=st.session_state["picked_categories"],
+                current_members_default=st.session_state["selected_members"],
+                current_match=st.session_state["match_mode"],
+                current_privacy=st.session_state["privacy_mode"],
+            )
 
-if df is None or df.empty:
-    st.info("Data Source is empty or invalid."); st.stop()
-if targets_df is None or targets_df.empty:
-    st.info("Provide targets via **Targets** sheet or inputs."); st.stop()
+# --------------------- LOAD CURRENT SELECTION ---------------------
+files = _list_projects()
+if not files:
+    st.warning(f"No .xlsx files found in {DATA_DIR}. Add workbooks with 'Data Source' & 'Targets'.")
+    st.stop()
 
+sel_idx = min(st.session_state["selected_project_index"], len(files)-1)
+selected_path = files[sel_idx]
+
+raw = _read_path(str(selected_path), selected_path.stat().st_mtime)
+if not isinstance(raw, dict) or "Data Source" not in raw:
+    st.error("Workbook must contain a sheet named **Data Source**."); st.stop()
+sheets: Dict[str, pd.DataFrame] = raw
+
+df_full = _normalize_cleaned_columns(sheets["Data Source"])
+df = df_full.copy()
+
+# Targets (with URL)
+if "Targets" in sheets:
+    targets_df = _get_targets_from_sheet_with_url(sheets["Targets"])
+else:
+    targets_df = pd.DataFrame(columns=["target_item","target_folder","target_url","mark","label","mark_len"])
+
+# Apply category filter from state
+if not targets_df.empty:
+    if st.session_state["picked_categories"]:
+        targets_df = targets_df[targets_df["target_folder"].isin(st.session_state["picked_categories"])].copy()
+
+# Apply member filter from state
+if not df.empty and st.session_state["selected_members"]:
+    df = df[df["Member"].astype(str).isin(st.session_state["selected_members"])].copy()
+
+privacy_mode = bool(st.session_state["privacy_mode"])
+match_speed = st.session_state["match_mode"]
+
+# --------------------- MATCH & AGGREGATE ---------------------
 def _split_views_and_reviews(d: pd.DataFrame):
     if "activity_type_norm" not in d.columns:
         return d.copy(), d.iloc[0:0].copy()
@@ -413,23 +446,18 @@ def _split_views_and_reviews(d: pd.DataFrame):
     is_review = s.str.contains("added", na=False) & s.str.contains("review", na=False)
     return d[~is_review].copy(), d[is_review].copy()
 
-# Split for filtered charts/tables
 df_views, df_reviews = _split_views_and_reviews(df)
-
-# Split for overall zero-view calculation (NOT member-filtered; but DOES respect category via targets_df)
-df_views_full, _ = _split_views_and_reviews(df_full)
+df_views_full, _ = _split_views_and_reviews(df_full)  # for zero-view (overall)
 
 def _assign(df_in: pd.DataFrame) -> pd.DataFrame:
     if match_speed.startswith("Starts"):  return _assign_marks_prefix(df_in, targets_df)
     if match_speed.startswith("Keyword"): return _assign_marks_flashtext(df_in, targets_df)
     return _assign_marks_contains(df_in, targets_df)
 
-# Matched datasets
 dfm_views       = _assign(df_views)
 dfm_reviews     = _assign(df_reviews) if not df_reviews.empty else df_reviews
-dfm_views_full  = _assign(df_views_full)  # for zero-view globally
+dfm_views_full  = _assign(df_views_full)
 
-# Aggregations (member-filtered)
 summary_all, viewers = _build_mark_summary(dfm_views, targets_df)
 if not dfm_reviews.empty:
     reviews_summary_all, _ = _build_mark_summary(dfm_reviews, targets_df)
@@ -437,7 +465,6 @@ if not dfm_reviews.empty:
 else:
     reviews_summary_all = pd.DataFrame(columns=["matched_mark","matched_folder","review_count","min","max","label"])
 
-# Aggregation for zero-view (overall, not member-filtered)
 summary_all_full, _ = _build_mark_summary(dfm_views_full, targets_df)
 
 def _attach_urls(summary_df: pd.DataFrame, targets: pd.DataFrame) -> pd.DataFrame:
@@ -452,13 +479,13 @@ summary_all         = _attach_urls(summary_all, targets_df)
 reviews_summary_all = _attach_urls(reviews_summary_all, targets_df) if not reviews_summary_all.empty else reviews_summary_all
 summary_all_full    = _attach_urls(summary_all_full, targets_df)
 
-# View-count slider (applies to member-filtered summary)
+# View-count filter (slider)
 actual_max = int(summary_all["view_count"].max()) if not summary_all.empty else 0
 slider_max = max(actual_max, 1)
 view_min, view_max = st.slider("Views between", 0, slider_max, (0, actual_max))
 summary = summary_all[(summary_all["view_count"] >= view_min) & (summary_all["view_count"] <= view_max)]
 
-# KPIs (member-filtered)
+# KPIs
 total_targets = len(targets_df)
 zero_items   = int((summary_all["view_count"] == 0).sum())
 found_items  = total_targets - zero_items
@@ -468,7 +495,6 @@ with c1: st.markdown(f'<div class="metric-card"><div class="metric-label">Total 
 with c2: st.markdown(f'<div class="metric-card"><div class="metric-label">Targets Viewed</div><div class="metric-value">{found_items:,}</div></div>', unsafe_allow_html=True)
 with c3: st.markdown(f'<div class="metric-card"><div class="metric-label">Zero-View Targets</div><div class="metric-value">{zero_items:,}</div></div>', unsafe_allow_html=True)
 
-# ----- privacy display helpers -----
 def _display_label(lbl: str) -> str:
     if not privacy_mode: return lbl
     if " [" in lbl and lbl.endswith("]"):
@@ -479,15 +505,17 @@ def _display_label(lbl: str) -> str:
 def _display_member(name: str) -> str:
     return _pseudonym(name) if privacy_mode else name
 
-# ============================
-# Views — Distribution (ALL; optional cap + sorting)
-# ============================
+# --------------------- VIEWS — DISTRIBUTION ---------------------
 fig_views = None
 if not summary.empty:
     st.markdown('<span class="section-chip">Views — Distribution</span>', unsafe_allow_html=True)
     colA, colB = st.columns([1,1])
+    sort_options = ["Most viewed", "Least viewed", "Alphabetical"]
+    # Default to Alphabetical as requested
+    default_idx = sort_options.index(st.session_state.get("views_sort_choice", "Alphabetical"))
     with colA:
-        sort_choice = st.radio("Sort by", ["Most viewed", "Least viewed", "Alphabetical"], horizontal=True, key="views_sort")
+        sort_choice = st.radio("Sort by", sort_options, horizontal=True, index=default_idx, key="views_sort")
+        st.session_state["views_sort_choice"] = sort_choice
     with colB:
         max_bars = st.number_input("Max bars (0 = all)", min_value=0, max_value=10000, value=0, step=50, key="views_max_bars")
 
@@ -509,9 +537,7 @@ if not summary.empty:
                             xaxis={"categoryorder":"array", "categoryarray": df_plot["label_display"].tolist()})
     st.plotly_chart(fig_views, use_container_width=True, key="views_dist")
 
-# ============================
-# Reviews chart (member-filtered)
-# ============================
+# --------------------- REVIEWS ---------------------
 fig_reviews = None
 if not reviews_summary_all.empty:
     st.markdown('<span class="section-chip">Reviews started — per Mark</span>', unsafe_allow_html=True)
@@ -523,9 +549,7 @@ if not reviews_summary_all.empty:
                               xaxis={"categoryorder":"array", "categoryarray": rs["label_display"].tolist()})
     st.plotly_chart(fig_reviews, use_container_width=True, key="reviews_started")
 
-# ============================
-# Viewers — Ranked (paged) + Top/Bottom plan lists
-# ============================
+# --------------------- VIEWERS — RANKED (paged) + lists ---------------------
 fig_viewers = None
 top10_plans = pd.DataFrame()
 bottom10_plans = pd.DataFrame()
@@ -533,21 +557,14 @@ bottom10_plans = pd.DataFrame()
 if not summary.empty:
     st.markdown('<span class="section-chip">Viewers — Ranked (paged)</span>', unsafe_allow_html=True)
 
-    # Build metrics from member-filtered data
     allowed = set(summary["label"].tolist())
     v2 = viewers[viewers["label"].isin(allowed)].copy()
 
-    distinct_by_member = (
-        v2.groupby("Member")["label"].nunique().rename("distinct_items").reset_index()
-    )
-    total_interactions_by_member = (
-        v2.groupby("Member")["count"].sum().rename("total_interactions").reset_index()
-    )
+    distinct_by_member = v2.groupby("Member")["label"].nunique().rename("distinct_items").reset_index()
+    total_interactions_by_member = v2.groupby("Member")["count"].sum().rename("total_interactions").reset_index()
 
-    # Default to "Total interactions"
     metric_choice = st.radio("Metric", ["Distinct plans viewed", "Total interactions"],
                              index=1, horizontal=True, key="viewer_metric")
-
     ranked = total_interactions_by_member if metric_choice == "Total interactions" else distinct_by_member
     y_col = "total_interactions" if metric_choice == "Total interactions" else "distinct_items"
     y_title = "Total interactions" if metric_choice == "Total interactions" else "Distinct plans"
@@ -559,16 +576,11 @@ if not summary.empty:
         ranked["Rank"] = ranked.index + 1
         ranked["Member_display"] = ranked["Member"].map(_display_member)
 
-        # Page size: default to max option (50)
         page_size = st.select_slider("Page size", options=[5,10,20,50], value=50, key="viewer_page_size")
-        total = len(ranked)
-        total_pages = max(1, math.ceil(total / page_size))
-
-        # Put the page slider on the last page by default (sticky thereafter)
-        default_page = st.session_state.get("viewer_page_slider", total_pages)
-        default_page = min(max(1, default_page), total_pages)
-        page = st.slider("Rank range (page)", min_value=1, max_value=total_pages,
-                         value=default_page, step=1, key="viewer_page_slider")
+        total = len(ranked); total_pages = max(1, math.ceil(total / page_size))
+        # FIRST PAGE by default
+        default_page = min(max(1, st.session_state.get("viewer_page_slider", 1)), total_pages)
+        page = st.slider("Rank range (page)", 1, total_pages, default_page, key="viewer_page_slider")
 
         start = (page - 1) * page_size
         end = min(start + page_size, total)
@@ -578,19 +590,12 @@ if not summary.empty:
 
         with c1:
             st.subheader(f"Viewers ranked by {metric_choice.lower()} — {start+1}–{end} of {total}")
-            fig_viewers = px.line(
-                current_slice,
-                x="Member_display", y=y_col,
-                markers=True,
-                labels={"Member_display":"Member", y_col:y_title}
-            )
+            fig_viewers = px.line(current_slice, x="Member_display", y=y_col, markers=True,
+                                  labels={"Member_display":"Member", y_col:y_title})
             fig_viewers.update_traces(mode="lines+markers")
-            fig_viewers.update_layout(
-                margin=dict(l=10,r=10,t=10,b=10),
-                xaxis=dict(categoryorder="array", categoryarray=current_slice["Member_display"].tolist()),
-                yaxis=dict(title=y_title),
-                height=520  # fixed height for better vertical alignment with lists
-            )
+            fig_viewers.update_layout(margin=dict(l=10,r=10,t=10,b=10),
+                                      xaxis=dict(categoryorder="array", categoryarray=current_slice["Member_display"].tolist()),
+                                      yaxis=dict(title=y_title), height=520)
             st.plotly_chart(fig_viewers, use_container_width=True, key="items_paged_line")
 
         with c2:
@@ -600,13 +605,10 @@ if not summary.empty:
 
             def _mk_list(df_, title):
                 if df_.empty:
-                    st.caption(f"{title}: none")
-                    return
+                    st.caption(f"{title}: none"); return
                 items = []
                 for _, r in df_.iterrows():
-                    text = _display_label(r["label"])
-                    vc = int(r["view_count"])
-                    url = r.get("url", None)
+                    text = _display_label(r["label"]); vc = int(r["view_count"]); url = r.get("url", None)
                     if isinstance(url, str) and url.strip():
                         items.append(f'<li><a href="{url}" target="_blank">{text}</a> — <b>{vc}</b></li>')
                     else:
@@ -616,61 +618,31 @@ if not summary.empty:
             _mk_list(top10_plans, "Top 10 plans by views")
             _mk_list(bottom10_plans, "Bottom 10 plans by views")
 
-# Details — VIEWS (with Open Plan link) — member-filtered
+# --------------------- DETAILS TABLES ---------------------
 st.markdown('<span class="section-chip">Details — Views</span>', unsafe_allow_html=True)
-display_df = summary[["label","view_count","min","max","url"]].rename(
-    columns={"label":"Mark [Category]","url":"Open Plan"}).copy()
+display_df = summary[["label","view_count","min","max","url"]].rename(columns={"label":"Mark [Category]","url":"Open Plan"}).copy()
 display_df["Mark [Category]"] = display_df["Mark [Category]"].map(_display_label)
 st.dataframe(display_df, use_container_width=True, hide_index=True,
              column_config={"Open Plan": st.column_config.LinkColumn("Open Plan", display_text="Open")})
 
-# ZERO-VIEW plans (overall; category filters applied; member filter NOT applied)
+# Zero-view (overall; category filters apply; NO member filter)
 zero_summary = summary_all_full[summary_all_full["view_count"] == 0].copy()
 st.markdown('<span class="section-chip">Zero-view plans (clickable)</span>', unsafe_allow_html=True)
 if not zero_summary.empty:
     q = st.text_input("Search a zero-view plan", value="")
     linkable = zero_summary.copy()
-    if q.strip():
-        linkable = linkable[linkable["label"].str.contains(re.escape(q), case=False, na=False)]
-
+    if q.strip(): linkable = linkable[linkable["label"].str.contains(re.escape(q), case=False, na=False)]
     def _card(label, folder, url):
         text = _display_label(label)
         if isinstance(url, str) and url.strip():
             return f'<div class="plan-card"><a href="{url}" target="_blank">{text}</a><div class="cat">{folder}</div></div>'
         return f'<div class="plan-card"><span>{text}</span><div class="cat">{folder}</div></div>'
-
     cards = [_card(r["label"], r["matched_folder"], r.get("url", None)) for _, r in linkable.sort_values("label").iterrows()]
     st.markdown('<div class="plan-grid">' + "".join(cards) + "</div>", unsafe_allow_html=True)
 else:
     st.success("Great! No zero-view plans for the selected categories.")
 
-# Viewers per Mark — add link (member-filtered)
-if not summary.empty and not viewers.empty:
-    st.markdown('<span class="section-chip">Viewers per Mark</span>', unsafe_allow_html=True)
-    options = sorted(summary["label"].unique().tolist())
-    pick = st.multiselect("Pick mark(s) to inspect", options, default=options[:1] if options else [])
-    if pick:
-        subt = viewers[viewers["label"].isin(pick)].copy()
-        subt = subt.sort_values(["matched_mark","matched_folder","count"], ascending=[True,True,False]) \
-                   .rename(columns={"matched_mark":"mark","matched_folder":"category"})
-        if "target_url" in targets_df.columns:
-            url_map = targets_df[["mark","target_folder","target_url"]].drop_duplicates()
-            subt = subt.merge(url_map, left_on=["mark","category"], right_on=["mark","target_folder"], how="left")
-            subt.drop(columns=["target_folder"], inplace=True, errors="ignore")
-            subt.rename(columns={"target_url":"Open Plan"}, inplace=True)
-        else:
-            subt["Open Plan"] = None
-        subt["mark"] = subt["mark"].map(_mask_middle) if privacy_mode else subt["mark"]
-        subt["Member"] = subt["Member"].map(_pseudonym) if privacy_mode else subt["Member"]
-        st.dataframe(subt[["mark","category","Member","count","Open Plan"]],
-                     use_container_width=True, hide_index=True,
-                     column_config={"Open Plan": st.column_config.LinkColumn("Open Plan", display_text="Open"),
-                                    "count": st.column_config.NumberColumn("Count", format="%d"),
-                                    "mark": "Mark", "category": "Category"})
-
-# -----------------------------
-# Exports (CSV)
-# -----------------------------
+# --------------------- EXPORTS ---------------------
 @st.cache_data
 def _csv_download_bytes(df_export: pd.DataFrame, privacy: bool, mask_exports: bool) -> bytes:
     df = df_export.copy()
@@ -680,6 +652,8 @@ def _csv_download_bytes(df_export: pd.DataFrame, privacy: bool, mask_exports: bo
         if "Member" in df.columns:
             df["Member"] = df["Member"].map(_pseudonym)
     return df.to_csv(index=False).encode("utf-8")
+
+apply_privacy_to_downloads = st.checkbox("Apply privacy masking to CSV downloads", value=False) if privacy_mode else False
 
 st.download_button("Download Views Summary CSV",
                    data=_csv_download_bytes(display_df, privacy_mode, apply_privacy_to_downloads),
@@ -698,110 +672,59 @@ if not reviews_summary_all.empty:
                        data=_csv_download_bytes(reviews_disp, privacy_mode, apply_privacy_to_downloads),
                        file_name="targets_mark_reviews_started.csv", mime="text/csv")
 
-# -----------------------------
-# Export FULL REPORT as PDF
-# -----------------------------
+# --------------------- PDF EXPORT ---------------------
 def _fig_to_png_bytes(fig, width=900, height=520, scale=2) -> bytes:
-    if fig is None:
-        return b""
+    if fig is None: return b""
     return pio.to_image(fig, format="png", width=width, height=height, scale=scale)
 
-def build_pdf(project_name: str,
-              kpis: Dict[str, int],
-              fig_views_img: bytes,
-              fig_reviews_img: bytes,
-              fig_viewers_img: bytes,
-              top_df: pd.DataFrame,
-              bottom_df: pd.DataFrame,
-              privacy: bool) -> bytes:
-    """
-    Compose a simple multi-page PDF with header, KPIs, charts, and top/bottom lists.
-    Page size = letter (612x792 points).
-    """
-    if not HAS_PDF:
-        raise RuntimeError("reportlab not installed")
-
-    buf = BytesIO()
-    c = canvas.Canvas(buf, pagesize=letter)
-    W, H = letter
-
-    def title(txt):
-        c.setFont("Helvetica-Bold", 14); c.drawString(40, H-60, txt)
-
+def build_pdf(project_name: str, kpis: Dict[str, int],
+              fig_views_img: bytes, fig_reviews_img: bytes, fig_viewers_img: bytes,
+              top_df: pd.DataFrame, bottom_df: pd.DataFrame, privacy: bool) -> bytes:
+    if not HAS_PDF: raise RuntimeError("reportlab not installed")
+    buf = BytesIO(); c = canvas.Canvas(buf, pagesize=letter); W, H = letter
+    def title(txt): c.setFont("Helvetica-Bold", 14); c.drawString(40, H-60, txt)
     def chip(y, label):
-        c.setFillColorRGB(0.949, 0.431, 0.129)  # ACCENT
-        c.roundRect(40, y-16, 220, 18, 6, fill=True, stroke=False)
-        c.setFillColorRGB(1,1,1); c.setFont("Helvetica-Bold", 9); c.drawString(48, y-12, label)
-        c.setFillColorRGB(0,0,0)
-
-    # --- Page 1: Header + KPIs + Views chart ---
+        c.setFillColorRGB(0.949, 0.431, 0.129); c.roundRect(40, y-16, 220, 18, 6, fill=True, stroke=False)
+        c.setFillColorRGB(1,1,1); c.setFont("Helvetica-Bold", 9); c.drawString(48, y-12, label); c.setFillColorRGB(0,0,0)
+    # Page 1
     title(f"ACC Activity Report — {project_name}")
-    c.setFont("Helvetica", 9)
-    c.drawString(40, H-80, "Privacy mode: " + ("ON (masked)" if privacy else "OFF"))
-    # KPIs
-    y = H-110
-    c.setFont("Helvetica-Bold", 11); c.drawString(40, y, "KPIs")
-    c.setFont("Helvetica", 10); y -= 16
-    for k, v in kpis.items():
-        c.drawString(50, y, f"- {k}: {v}")
-        y -= 14
-    # Views chart
+    c.setFont("Helvetica", 9); c.drawString(40, H-80, "Privacy mode: " + ("ON (masked)" if privacy else "OFF"))
+    y = H-110; c.setFont("Helvetica-Bold", 11); c.drawString(40, y, "KPIs"); c.setFont("Helvetica", 10); y -= 16
+    for k, v in kpis.items(): c.drawString(50, y, f"- {k}: {v}"); y -= 14
     chip(y-10, "Views — Distribution")
-    if fig_views_img:
-        img = ImageReader(BytesIO(fig_views_img))
-        c.drawImage(img, 40, 120, width=532, height=320, preserveAspectRatio=True, mask='auto')
+    if fig_views_img: c.drawImage(ImageReader(BytesIO(fig_views_img)), 40, 120, width=532, height=320, preserveAspectRatio=True, mask='auto')
     c.showPage()
-
-    # --- Page 2: Viewers chart + Reviews chart ---
+    # Page 2
     title(f"ACC Activity Report — {project_name}")
     chip(H-90, "Viewers — Ranked")
-    if fig_viewers_img:
-        img = ImageReader(BytesIO(fig_viewers_img))
-        c.drawImage(img, 40, H-430, width=532, height=300, preserveAspectRatio=True, mask='auto')
+    if fig_viewers_img: c.drawImage(ImageReader(BytesIO(fig_viewers_img)), 40, H-430, width=532, height=300, preserveAspectRatio=True, mask='auto')
     chip(160, "Reviews started — per Mark")
-    if fig_reviews_img:
-        img = ImageReader(BytesIO(fig_reviews_img))
-        c.drawImage(img, 40, 40, width=532, height=100, preserveAspectRatio=True, mask='auto')
+    if fig_reviews_img: c.drawImage(ImageReader(BytesIO(fig_reviews_img)), 40, 40, width=532, height=100, preserveAspectRatio=True, mask='auto')
     c.showPage()
-
-    # --- Page 3: Top/Bottom lists ---
+    # Page 3
     title(f"ACC Activity Report — {project_name}")
-    chip(H-90, "Top 10 plans by views")
-    c.setFont("Helvetica", 10)
-    y = H-110
+    chip(H-90, "Top 10 plans by views"); c.setFont("Helvetica", 10); y = H-110
     if not top_df.empty:
         for _, r in top_df.iterrows():
             text = r["label"]
             if privacy:
                 if " [" in text and text.endswith("]"):
-                    m = text.split(" [",1)[0]; cat = text[len(m)+1:]
-                    text = _mask_middle(m) + cat
-                else:
-                    text = _mask_middle(text)
-            c.drawString(50, y, f"• {text} — {int(r['view_count'])}")
-            y -= 14
+                    m = text.split(" [",1)[0]; cat = text[len(m)+1:]; text = _mask_middle(m) + cat
+                else: text = _mask_middle(text)
+            c.drawString(50, y, f"• {text} — {int(r['view_count'])}"); y -= 14
             if y < 60: break
-    chip(y-10, "Bottom 10 plans by views")
-    y -= 30
+    chip(y-10, "Bottom 10 plans by views"); y -= 30
     if not bottom_df.empty:
         for _, r in bottom_df.iterrows():
             text = r["label"]
             if privacy:
                 if " [" in text and text.endswith("]"):
-                    m = text.split(" [",1)[0]; cat = text[len(m)+1:]
-                    text = _mask_middle(m) + cat
-                else:
-                    text = _mask_middle(text)
-            c.drawString(50, y, f"• {text} — {int(r['view_count'])}")
-            y -= 14
+                    m = text.split(" [",1)[0]; cat = text[len(m)+1:]; text = _mask_middle(m) + cat
+                else: text = _mask_middle(text)
+            c.drawString(50, y, f"• {text} — {int(r['view_count'])}"); y -= 14
             if y < 40: break
+    c.showPage(); c.save(); buf.seek(0); return buf.getvalue()
 
-    c.showPage()
-    c.save()
-    buf.seek(0)
-    return buf.getvalue()
-
-# Build PDF bytes (when user clicks)
 with st.expander("Export", expanded=True):
     st.caption("Generate a multi-page PDF of the current view (KPIs + charts + top/bottom lists).")
     if not HAS_PDF:
@@ -811,26 +734,14 @@ with st.expander("Export", expanded=True):
             views_img   = _fig_to_png_bytes(fig_views) if fig_views is not None else b""
             reviews_img = _fig_to_png_bytes(fig_reviews, height=320) if fig_reviews is not None else b""
             viewers_img = _fig_to_png_bytes(fig_viewers) if fig_viewers is not None else b""
-
-            # Project name for header
             project_name = selected_path.stem if isinstance(selected_path, Path) else str(selected_path)
-
             pdf_bytes = build_pdf(
                 project_name=project_name,
-                kpis={"Total Targets": total_targets,
-                      "Targets Viewed": found_items,
-                      "Zero-View Targets": zero_items},
-                fig_views_img=views_img,
-                fig_reviews_img=reviews_img,
-                fig_viewers_img=viewers_img,
-                top_df=top10_plans,
-                bottom_df=bottom10_plans,
-                privacy=privacy_mode
+                kpis={"Total Targets": total_targets, "Targets Viewed": found_items, "Zero-View Targets": zero_items},
+                fig_views_img=views_img, fig_reviews_img=reviews_img, fig_viewers_img=viewers_img,
+                top_df=top10_plans, bottom_df=bottom10_plans, privacy=privacy_mode
             )
-
             st.download_button("📄 Download full report (PDF)",
-                               data=pdf_bytes,
-                               file_name=f"{project_name}_ACC_Report.pdf",
-                               mime="application/pdf")
+                               data=pdf_bytes, file_name=f"{project_name}_ACC_Report.pdf", mime="application/pdf")
         except Exception as e:
             st.error(f"PDF export failed: {e}\nTip: ensure `kaleido` and `reportlab` are installed.")
