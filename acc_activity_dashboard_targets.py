@@ -1,7 +1,8 @@
-# ACC Activity Dashboard — Performance build
+# ACC Activity Dashboard — Performance build + sanitized Filters dialog defaults
 # - Disk sidecar cache (Parquet) for Excel sheets
 # - Aggressive Streamlit caching keyed by (file path, mtime, categories, members, match mode)
 # - Single-pass compute; slider only filters cached aggregates
+# - Export popover (CSV + exact Print/Save as PDF); Export left of Filters
 # Run:
 #   pip install -r requirements.txt
 #   streamlit run acc_activity_dashboard_targets.py
@@ -39,7 +40,8 @@ TARGET_SHEETS = ("Data Source", "Targets")
 # =========================
 # THEME
 # =========================
-if "dark_mode" not in st.session_state: st.session_state["dark_mode"] = False
+if "dark_mode" not in st.session_state:
+    st.session_state["dark_mode"] = False
 IS_DARK = bool(st.session_state["dark_mode"])
 
 LIGHT = dict(primary="#254467", accent="#f26e21", accent2="#22c55e",
@@ -142,14 +144,20 @@ def _list_projects() -> List[Path]:
     DATA_DIR.mkdir(exist_ok=True)
     return sorted(DATA_DIR.glob("*.xlsx"))
 
-if "selected_project_index" not in st.session_state: st.session_state["selected_project_index"] = 0
-if "picked_categories" not in st.session_state:     st.session_state["picked_categories"] = None
-if "selected_members" not in st.session_state:       st.session_state["selected_members"] = []
+if "selected_project_index" not in st.session_state:
+    st.session_state["selected_project_index"] = 0
+if "picked_categories" not in st.session_state:
+    st.session_state["picked_categories"] = None
+if "selected_members" not in st.session_state:
+    st.session_state["selected_members"] = []
 if "match_mode" not in st.session_state:
     st.session_state["match_mode"] = "Keyword search (fast, needs FlashText)" if HAS_FLASHTEXT else "Starts with (fast)"
-if "views_sort_choice" not in st.session_state:      st.session_state["views_sort_choice"] = "Alphabetical"
-if "viewer_page_slider" not in st.session_state:     st.session_state["viewer_page_slider"] = 1
-if "views_slider" not in st.session_state:           st.session_state["views_slider"] = (0, 0)
+if "views_sort_choice" not in st.session_state:
+    st.session_state["views_sort_choice"] = "Alphabetical"
+if "viewer_page_slider" not in st.session_state:
+    st.session_state["viewer_page_slider"] = 1
+if "views_slider" not in st.session_state:
+    st.session_state["views_slider"] = (0, 0)
 
 # =========================
 # HELPERS
@@ -188,7 +196,8 @@ def _sidecar_paths(xlsx: Path) -> Tuple[Path, Path, Path]:
     base = CACHE_DIR / xlsx.stem
     return base.with_suffix(".data.parquet"), base.with_suffix(".targets.parquet"), base.with_suffix(".meta.json")
 
-def _write_sidecar(meta_p: Path, data_p: Path, targets_p: Path, mtime: float, df_data: pd.DataFrame, df_targets: pd.DataFrame):
+def _write_sidecar(meta_p: Path, data_p: Path, targets_p: Path, mtime: float,
+                   df_data: pd.DataFrame, df_targets: pd.DataFrame):
     meta = {"mtime": mtime}
     meta_p.parent.mkdir(parents=True, exist_ok=True)
     meta_p.write_text(json.dumps(meta))
@@ -208,7 +217,8 @@ def _sidecars_fresh(meta_p: Path, mtime: float) -> bool:
 @st.cache_data(show_spinner=False)
 def _read_excel_sheets(path_str: str, mtime: float) -> Dict[str, pd.DataFrame]:
     p = Path(path_str)
-    wb = pd.read_excel(p.read_bytes(), engine="openpyxl", sheet_name=None)
+    # Use BytesIO to avoid re-reading from disk twice and for openpyxl bytes support
+    wb = pd.read_excel(BytesIO(p.read_bytes()), engine="openpyxl", sheet_name=None)
     return wb
 
 @st.cache_data(show_spinner=False)
@@ -243,16 +253,16 @@ def _load_tables(path_str: str, mtime: float) -> Tuple[pd.DataFrame, pd.DataFram
         ds["DateOnly"] = ds["Date"].dt.date
     else:
         ds["DateOnly"] = pd.NaT
-    # activity type norm
     for cand in ["Activity Type", "activity_type", "Action", "action"]:
         if cand in ds.columns:
             ds["activity_type_norm"] = ds[cand].astype(str).str.lower()
             break
     else:
         ds["activity_type_norm"] = pd.Series([None] * len(ds))
-    # dtypes
-    try: ds["Member"] = ds["Member"].astype("category")
-    except Exception: pass
+    try:
+        ds["Member"] = ds["Member"].astype("category")
+    except Exception:
+        pass
     ds["item_name"] = ds["item_name"].astype(str)
 
     # Targets
@@ -429,7 +439,6 @@ def _build_aggregates(path_str: str,
 
     actual_max = int(summary_all["view_count"].max()) if not summary_all.empty else 0
 
-    # Do not apply privacy here; we mask only at render/download time (cheap).
     return dict(
         summary_all=summary_all,
         summary_all_full=summary_all_full,
@@ -452,33 +461,72 @@ selected_path = files[sel_idx]
 mtime = selected_path.stat().st_mtime
 
 # =========================
-# FILTERS DIALOG
+# FILTERS DIALOG (sanitized defaults)
 # =========================
 @st.dialog("Filters")
 def _filters_dialog(files: List[Path], current_idx: int):
     st.caption("Choose a project and refine filters. Click **Apply** to refresh.")
-    sel_idx = st.selectbox("Project workbook", options=list(range(len(files))),
-                           format_func=lambda i: files[i].stem, index=min(current_idx, len(files)-1))
-    # Load candidates (fast because of sidecar cache)
+
+    if not files:
+        st.error("No .xlsx files in Data/. Add a workbook first.")
+        return
+
+    sel_idx = st.selectbox(
+        "Project workbook",
+        options=list(range(len(files))),
+        format_func=lambda i: files[i].stem,
+        index=min(current_idx, len(files) - 1),
+    )
+
+    # Load tables for the selected workbook (fast because of sidecar cache)
     ds, tg = _load_tables(str(files[sel_idx]), files[sel_idx].stat().st_mtime)
-    cats = sorted(tg["target_folder"].unique().tolist()) if not tg.empty else []
-    default_cats = (st.session_state["picked_categories"] if st.session_state["picked_categories"] is not None else cats)
-    picked_cats = st.multiselect("Categories", options=cats, default=default_cats)
 
+    # ---- Categories (sanitize defaults) ----
+    cats = sorted(tg["target_folder"].dropna().astype(str).unique().tolist()) if not tg.empty else []
+    prev_cats = st.session_state.get("picked_categories")  # None or list[str]
+    if prev_cats is None:
+        default_cats = cats[:]  # all
+    else:
+        default_cats = [c for c in prev_cats if c in cats]
+
+    picked_cats = st.multiselect(
+        "Categories",
+        options=cats,
+        default=default_cats,
+        placeholder="All categories",
+    )
+
+    # ---- Members (sanitize defaults) ----
     members = sorted(ds["Member"].dropna().astype(str).unique().tolist())
-    sel_members = st.multiselect("Members (empty = all)", options=members, default=st.session_state["selected_members"])
+    prev_members = st.session_state.get("selected_members", [])
+    default_members = [m for m in prev_members if m in members]
 
-    match_mode = st.selectbox("Matching mode",
-                              ["Starts with (fast)", "Keyword search (fast, needs FlashText)", "Contains anywhere (slow)"],
-                              index=["Starts with (fast)","Keyword search (fast, needs FlashText)","Contains anywhere (slow)"].index(st.session_state["match_mode"]))
+    sel_members = st.multiselect(
+        "Members (empty = all)",
+        options=members,
+        default=default_members,
+        placeholder="All members",
+    )
 
-    privacy = st.toggle("Privacy mode — blur/mask Members & Item labels", value=st.session_state.get("privacy_mode", False))
+    # ---- Other options ----
+    match_mode = st.selectbox(
+        "Matching mode",
+        ["Starts with (fast)", "Keyword search (fast, needs FlashText)", "Contains anywhere (slow)"],
+        index=["Starts with (fast)", "Keyword search (fast, needs FlashText)", "Contains anywhere (slow)"].index(
+            st.session_state["match_mode"]
+        ),
+    )
+
+    privacy = st.toggle(
+        "Privacy mode — blur/mask Members & Item labels",
+        value=st.session_state.get("privacy_mode", False),
+    )
 
     c1, c2 = st.columns(2)
     with c1:
         if st.button("Apply", type="primary", use_container_width=True):
             st.session_state["selected_project_index"] = int(sel_idx)
-            st.session_state["picked_categories"] = picked_cats if picked_cats else None
+            st.session_state["picked_categories"] = picked_cats if picked_cats else None  # None = all
             st.session_state["selected_members"] = sel_members
             st.session_state["match_mode"] = match_mode
             st.session_state["privacy_mode"] = privacy
@@ -514,7 +562,8 @@ st.markdown('<div class="top-controls"></div>', unsafe_allow_html=True)
 ctA, ctB, ctC = st.columns([8.5, 0.8, 0.8], vertical_alignment="center")
 with ctA:
     dark_now = st.toggle("🌙 Dark mode", value=IS_DARK, key="dark_mode", help="Force dark theme on/off")
-    if dark_now != IS_DARK: st.rerun()
+    if dark_now != IS_DARK:
+        st.rerun()
 
 with ctB:
     with st.popover("⬇️ Export", use_container_width=True):
@@ -540,7 +589,7 @@ with ctB:
         vmin, vmax = st.session_state["views_slider"]
         summary_now = summary_all[(summary_all["view_count"] >= vmin) & (summary_all["view_count"] <= vmax)]
 
-        # Build CSVs (joins are cheap)
+        # Build CSVs
         df_views = summary_now[["label","view_count","min","max"]].merge(url_lookup, on="label", how="left") \
                     .rename(columns={"label":"Mark [Category]","target_url":"Open Plan"})
         df_zeros = summary_all[summary_all["view_count"] == 0][["label","view_count","min","max"]] \
@@ -579,9 +628,12 @@ zero_items   = int((summary_all["view_count"] == 0).sum())
 found_items  = total_targets - zero_items
 
 mc1, mc2, mc3 = st.columns(3)
-with mc1: st.markdown(f'<div class="metric-card"><div class="metric-label">Total Targets</div><div class="metric-value">{total_targets:,}</div></div>', unsafe_allow_html=True)
-with mc2: st.markdown(f'<div class="metric-card"><div class="metric-label">Targets Viewed</div><div class="metric-value">{found_items:,}</div></div>', unsafe_allow_html=True)
-with mc3: st.markdown(f'<div class="metric-card"><div class="metric-label">Zero-View Targets</div><div class="metric-value">{zero_items:,}</div></div>', unsafe_allow_html=True)
+with mc1:
+    st.markdown(f'<div class="metric-card"><div class="metric-label">Total Targets</div><div class="metric-value">{total_targets:,}</div></div>', unsafe_allow_html=True)
+with mc2:
+    st.markdown(f'<div class="metric-card"><div class="metric-label">Targets Viewed</div><div class="metric-value">{found_items:,}</div></div>', unsafe_allow_html=True)
+with mc3:
+    st.markdown(f'<div class="metric-card"><div class="metric-label">Zero-View Targets</div><div class="metric-value">{zero_items:,}</div></div>', unsafe_allow_html=True)
 
 # =========================
 # VIEWS — DISTRIBUTION
@@ -598,10 +650,14 @@ if not summary.empty:
         max_bars = st.number_input("Max bars (0 = all)", min_value=0, max_value=10000, value=0, step=50, key="views_max_bars")
 
     df_plot = summary.copy()
-    if sort_choice == "Most viewed":   df_plot = df_plot.sort_values("view_count", ascending=False)
-    elif sort_choice == "Least viewed": df_plot = df_plot.sort_values("view_count", ascending=True)
-    else:                               df_plot = df_plot.sort_values("label", ascending=True)
-    if max_bars and max_bars > 0: df_plot = df_plot.head(int(max_bars))
+    if sort_choice == "Most viewed":
+        df_plot = df_plot.sort_values("view_count", ascending=False)
+    elif sort_choice == "Least viewed":
+        df_plot = df_plot.sort_values("view_count", ascending=True)
+    else:
+        df_plot = df_plot.sort_values("label", ascending=True)
+    if max_bars and max_bars > 0:
+        df_plot = df_plot.head(int(max_bars))
 
     df_plot["label_display"] = df_plot["label"].map(lambda s: _display_label(s, privacy_mode))
     fig_views = px.bar(df_plot, x="label_display", y="view_count",
