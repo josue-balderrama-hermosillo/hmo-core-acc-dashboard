@@ -1,8 +1,8 @@
-# ACC Activity Dashboard — Performance build + sanitized Filters + RESET ON PROJECT CHANGE
-# - Disk sidecar cache (Parquet) for Excel sheets
-# - Aggressive Streamlit caching keyed by (file path, mtime, categories, members, match mode)
-# - Auto-reset filters when switching projects (prevents stale filters)
-# - Export popover (CSV + exact Print/Save as PDF); Export left of Filters
+# ACC Activity Dashboard — Project Title Dropdown + Reset-on-change
+# - Sticky header with logos
+# - NEW: Project "title" select (dropdown) visible at top
+# - Auto-reset filters when switching projects
+# - Parquet sidecar cache, fast aggregates, CSV exports, print-to-PDF of current view
 # Run:
 #   pip install -r requirements.txt
 #   streamlit run acc_activity_dashboard_targets.py
@@ -18,7 +18,6 @@ from typing import Dict, List, Tuple
 import pandas as pd
 import streamlit as st
 import plotly.express as px
-import plotly.io as pio
 import streamlit.components.v1 as components
 
 # Optional fast keyword engine
@@ -69,11 +68,16 @@ div.block-container {{ padding-top: 0.35rem !important; padding-bottom: 0.8rem; 
   position: sticky; top: 4px; z-index: 1000;
   width:100%; background:{C['primary']}; color:white; padding:12px 16px;
   display:flex; align-items:center; justify-content:space-between; gap:12px;
-  border-radius:12px; box-shadow:{C['shadow']}; margin:0 0 8px 0;
+  border-radius:12px; box-shadow:{C['shadow']}; margin:0 0 6px 0;
 }}
 .header-bar .title {{ font-size:20px; font-weight:700; text-align:center; flex:1 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
 .header-logo {{ height:32px; flex:0 0 auto; }}
 .right-logo {{ filter: invert(1) !important; }}
+
+.project-chooser {{
+  display:flex; justify-content:center; margin: 2px 0 6px 0;
+}}
+.project-chooser .hint {{ text-align:center; font-size:12px; color:{C['subtext']}; margin-bottom:2px; }}
 
 .top-controls {{
   position: sticky; top: 56px; z-index: 1000;
@@ -175,6 +179,15 @@ def _derive_mark(text: str) -> str:
     if " - " in s: s = s.split(" - ", 1)[0]
     else: s = s.split()[0] if s else ""
     return s
+
+def _pretty_name(p: Path) -> str:
+    """Human-friendly project title: remove ext/date-ish tails; spaces instead of underscores."""
+    s = p.stem
+    s = s.replace("_", " ")
+    # drop obvious timestamp suffixes e.g. 20250811_16.04.36 or - 2025-08-11
+    s = re.sub(r"[ _-](20\d{2}[-_.]?\d{2}[-_.]?\d{2})(?:[ _.-]*\d{1,2}[.:]\d{2}(?:[.:]\d{2})?)?$", "", s)
+    s = re.sub(r"\s{2,}", " ", s).strip()
+    return s or p.stem
 
 def _mask_middle(text: str, keep_left: int = 3, keep_right: int = 2) -> str:
     s = str(text)
@@ -460,64 +473,68 @@ sel_idx = min(st.session_state["selected_project_index"], len(files)-1)
 selected_path = files[sel_idx]
 mtime = selected_path.stat().st_mtime
 
-# ====== NEW: Reset filters when project changes ======
+# ====== Reset filters when project changes (robust) ======
 project_key = f"{selected_path.resolve()}::{mtime}"
 if st.session_state["_last_project_key"] != project_key:
-    # reset everything that can stale across projects
     st.session_state["picked_categories"] = None
     st.session_state["selected_members"] = []
-    st.session_state["views_slider"] = (0, 0)           # will be set to (0, actual_max) after compute
+    st.session_state["views_slider"] = (0, 0)
     st.session_state["views_sort_choice"] = "Alphabetical"
     st.session_state["viewer_page_slider"] = 1
     st.session_state["viewer_page_size"] = 50
     st.session_state["viewer_metric"] = "Total interactions"
     st.session_state["_last_project_key"] = project_key
-    st.rerun()
+    # Note: don't rerun here yet; we want to render the dropdown first
 
 # =========================
-# FILTERS DIALOG (sanitized defaults)
+# NEW: PROJECT TITLE DROPDOWN (visible control)
+# =========================
+st.markdown('<div class="project-chooser"><div class="hint">Project</div></div>', unsafe_allow_html=True)
+c1, c2, c3 = st.columns([1, 3, 1])
+with c2:
+    pick = st.selectbox(
+        label="Project",
+        options=list(range(len(files))),
+        index=sel_idx,
+        format_func=lambda i: _pretty_name(files[i]),
+        key="project_title_select",
+        label_visibility="collapsed",
+        help="Switch project workbook",
+    )
+    if pick != sel_idx:
+        # Update selection and force a clean reset on next cycle
+        st.session_state["selected_project_index"] = int(pick)
+        st.session_state["_last_project_key"] = ""   # triggers reset block above
+        st.rerun()
+
+# =========================
+# FILTERS DIALOG (still available)
 # =========================
 @st.dialog("Filters")
 def _filters_dialog(files: List[Path], current_idx: int):
     st.caption("Choose a project and refine filters. Click **Apply** to refresh.")
-
     if not files:
-        st.error("No .xlsx files in Data/. Add a workbook first.")
-        return
+        st.error("No .xlsx files in Data/. Add a workbook first."); return
 
-    sel_idx = st.selectbox(
+    sel_idx_local = st.selectbox(
         "Project workbook",
         options=list(range(len(files))),
-        format_func=lambda i: files[i].stem,
+        format_func=lambda i: _pretty_name(files[i]),
         index=min(current_idx, len(files) - 1),
     )
 
-    ds, tg = _load_tables(str(files[sel_idx]), files[sel_idx].stat().st_mtime)
+    ds, tg = _load_tables(str(files[sel_idx_local]), files[sel_idx_local].stat().st_mtime)
 
     cats = sorted(tg["target_folder"].dropna().astype(str).unique().tolist()) if not tg.empty else []
     prev_cats = st.session_state.get("picked_categories")
-    if prev_cats is None:
-        default_cats = cats[:]  # all
-    else:
-        default_cats = [c for c in prev_cats if c in cats]
+    default_cats = (cats[:] if prev_cats is None else [c for c in prev_cats if c in cats])
 
-    picked_cats = st.multiselect(
-        "Categories",
-        options=cats,
-        default=default_cats,
-        placeholder="All categories",
-    )
+    picked_cats = st.multiselect("Categories", options=cats, default=default_cats, placeholder="All categories")
 
     members = sorted(ds["Member"].dropna().astype(str).unique().tolist())
     prev_members = st.session_state.get("selected_members", [])
     default_members = [m for m in prev_members if m in members]
-
-    sel_members = st.multiselect(
-        "Members (empty = all)",
-        options=members,
-        default=default_members,
-        placeholder="All members",
-    )
+    sel_members = st.multiselect("Members (empty = all)", options=members, default=default_members, placeholder="All members")
 
     match_mode = st.selectbox(
         "Matching mode",
@@ -526,29 +543,22 @@ def _filters_dialog(files: List[Path], current_idx: int):
             st.session_state["match_mode"]
         ),
     )
+    privacy = st.toggle("Privacy mode — blur/mask Members & Item labels", value=st.session_state.get("privacy_mode", False))
 
-    privacy = st.toggle(
-        "Privacy mode — blur/mask Members & Item labels",
-        value=st.session_state.get("privacy_mode", False),
-    )
-
-    c1, c2 = st.columns(2)
-    with c1:
+    cL, cR = st.columns(2)
+    with cL:
         if st.button("Apply", type="primary", use_container_width=True):
-            # If the user also switched project in the dialog, force a reset on next run
-            new_key = f"{files[sel_idx].resolve()}::{files[sel_idx].stat().st_mtime}"
+            # If project changed in dialog, reset on next cycle
+            new_key = f"{files[sel_idx_local].resolve()}::{files[sel_idx_local].stat().st_mtime}"
+            st.session_state["selected_project_index"] = int(sel_idx_local)
             if st.session_state["_last_project_key"] != new_key:
-                st.session_state["selected_project_index"] = int(sel_idx)
-                st.session_state["_last_project_key"] = ""  # trigger reset in top-level section
-            else:
-                st.session_state["selected_project_index"] = int(sel_idx)
-
-            st.session_state["picked_categories"] = picked_cats if picked_cats else None  # None = all
+                st.session_state["_last_project_key"] = ""  # trigger reset
+            st.session_state["picked_categories"] = picked_cats if picked_cats else None
             st.session_state["selected_members"] = sel_members
             st.session_state["match_mode"] = match_mode
             st.session_state["privacy_mode"] = privacy
             st.rerun()
-    with c2:
+    with cR:
         if st.button("Close", use_container_width=True):
             st.rerun()
 
@@ -568,7 +578,7 @@ reviews_summary_all = agg["reviews_summary_all"]
 url_lookup          = agg["url_lookup"]
 actual_max          = agg["actual_max"]
 
-# Initialize slider default once per workbook (after compute)
+# Initialize slider default once per workbook
 if st.session_state["views_slider"] == (0, 0):
     st.session_state["views_slider"] = (0, actual_max)
 
