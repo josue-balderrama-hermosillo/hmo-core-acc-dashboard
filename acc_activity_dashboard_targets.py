@@ -9,7 +9,7 @@ import json
 import hashlib
 from io import BytesIO
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 import pandas as pd
 import streamlit as st
@@ -29,8 +29,20 @@ except Exception:
 st.set_page_config(page_title="Core Innovation - ACC Activity Analysis — HMO MTY",
                    page_icon="📌", layout="wide")
 
-ENABLE_PARQUET_SIDECASTE = True  # set False to disable disk sidecars
+# (fixed) name + guard for parquet sidecars
+ENABLE_PARQUET_SIDECAR = True  # set False to disable disk sidecars
+try:
+    import pyarrow  # noqa: F401
+    _PARQUET_OK = True
+except Exception:
+    _PARQUET_OK = False
+ENABLE_PARQUET_SIDECAR = ENABLE_PARQUET_SIDECAR and _PARQUET_OK
+
 TARGET_SHEETS = ("Data Source", "Targets")
+
+# small key helper to avoid typos
+def _k(*parts: str) -> str:
+    return "::".join(parts)
 
 # =========================
 # THEME
@@ -77,19 +89,19 @@ div.block-container {{ padding-top: 0.35rem !important; padding-bottom: 0.8rem; 
 
 /* 🔶 BIG orange project dropdown (title) */
 .project-chooser-marker + div [data-testid="stSelectbox"]:first-of-type div[data-baseweb="select"] > div {{
-  background: {C['accent']};                /* Hermosillo orange */
+  background: {C['accent']};
   border: 3px solid {C['accent']};
   border-radius: 24px;
-  min-height: 72px;                          /* taller */
+  min-height: 72px;
   box-shadow: {C['shadow']};
 }}
 .project-chooser-marker + div [data-testid="stSelectbox"]:first-of-type div[data-baseweb="select"] > div > div {{
-  color: #ffffff;                            /* bold white label */
+  color: #ffffff;
   font-weight: 900;
-  font-size: 26px;                           /* bigger text */
+  font-size: 26px;
   letter-spacing: .2px;
 }}
-.project-chooser-marker + div [data-testid="stSelectbox"]:first-of-type svg {{ fill: #ffffff; }} /* white caret */
+.project-chooser-marker + div [data-testid="stSelectbox"]:first-of-type svg {{ fill: #ffffff; }}
 
 /* Top controls row (Export / Filters / Dark mode) */
 .top-controls {{
@@ -98,15 +110,14 @@ div.block-container {{ padding-top: 0.35rem !important; padding-bottom: 0.8rem; 
 }}
 button[kind="secondary"] {{ padding: 0.25rem 0.6rem !important; }}
 
-/* ===== Quick Filters Card =====
-   Make the white background a full card that wraps ALL quick filters */
+/* ===== Quick Filters Card ===== */
 .quick-filters {{
   width: 100%;
-  background:{C['card']};                    /* white in light theme */
+  background:{C['card']};
   border:1px solid {C['border']};
-  border-radius: 22px;                       /* rounded white bar look */
-  padding: 18px 20px 22px;                   /* taller so it covers all controls */
-  margin: 8px 0 10px;                        /* a little separation from title */
+  border-radius: 22px;
+  padding: 18px 20px 22px;
+  margin: 8px 0 10px;
   box-shadow:{C['shadow']};
 }}
 .cat-grid {{ display:flex; flex-wrap:wrap; gap:6px; }}
@@ -207,11 +218,12 @@ if "_last_project_key" not in st.session_state:
 # HELPERS
 # =========================
 def _derive_mark(text: str) -> str:
-    if not isinstance(text, str): return ""
-    s = str(text).strip()
-    if " - " in s: s = s.split(" - ", 1)[0]
-    else: s = s.split()[0] if s else ""
-    return s
+    if not isinstance(text, str):
+        return ""
+    s = text.strip()
+    if " - " in s:
+        return s.split(" - ", 1)[0]
+    return s.split()[0] if s else ""
 
 def _pretty_name(p: Path) -> str:
     s = p.stem.replace("_", " ")
@@ -221,18 +233,21 @@ def _pretty_name(p: Path) -> str:
 
 def _mask_middle(text: str, keep_left: int = 3, keep_right: int = 2) -> str:
     s = str(text)
-    if len(s) <= keep_left + keep_right: return "•"*len(s)
-    return s[:keep_left] + "•"*(len(s)-keep_left-keep_right) + s[-keep_right:]
+    if len(s) <= keep_left + keep_right:
+        return "•" * len(s)
+    return s[:keep_left] + "•" * (len(s) - keep_left - keep_right) + s[-keep_right:]
 
 def _pseudonym(name: str) -> str:
-    if not isinstance(name, str) or name.strip() == "": return ""
+    if not isinstance(name, str) or name.strip() == "":
+        return ""
     h = hashlib.sha1(name.encode("utf-8")).hexdigest()[:6].upper()
     return f"User-{h}"
 
 def _display_label(lbl: str, privacy: bool) -> str:
-    if not privacy: return lbl
+    if not privacy:
+        return lbl
     if " [" in lbl and lbl.endswith("]"):
-        mark = lbl.split(" [",1)[0]; cat = lbl[len(mark)+1:]
+        mark = lbl.split(" [", 1)[0]; cat = lbl[len(mark)+1:]
         return _mask_middle(mark) + cat
     return _mask_middle(lbl)
 
@@ -275,7 +290,7 @@ def _load_tables(path_str: str, mtime: float) -> Tuple[pd.DataFrame, pd.DataFram
     xlsx = Path(path_str)
     data_p, targets_p, meta_p = _sidecar_paths(xlsx)
 
-    if ENABLE_PARQUET_SIDECASTE and data_p.exists() and targets_p.exists() and meta_p.exists() and _sidecars_fresh(meta_p, mtime):
+    if ENABLE_PARQUET_SIDECAR and data_p.exists() and targets_p.exists() and meta_p.exists() and _sidecars_fresh(meta_p, mtime):
         try:
             ds = pd.read_parquet(data_p)
             tg = pd.read_parquet(targets_p)
@@ -287,7 +302,7 @@ def _load_tables(path_str: str, mtime: float) -> Tuple[pd.DataFrame, pd.DataFram
     if "Data Source" not in wb:
         raise RuntimeError("Workbook must contain a sheet named 'Data Source'.")
 
-    ds = wb["Data Source"].copy()
+    ds = wb["Data Source"]
     if "item_name" not in ds.columns and "item_name_file_ext" in ds.columns:
         ds = ds.rename(columns={"item_name_file_ext": "item_name"})
     if "Member" not in ds.columns:
@@ -307,12 +322,12 @@ def _load_tables(path_str: str, mtime: float) -> Tuple[pd.DataFrame, pd.DataFram
         ds["Member"] = ds["Member"].astype("category")
     except Exception:
         pass
-    ds["item_name"] = ds["item_name"].astype(str)
+    ds["item_name"] = ds["item_name"].astype("string")
 
     # Targets
     tg = pd.DataFrame(columns=["target_item","target_folder","target_url","mark","label","mark_len"])
     if "Targets" in wb:
-        raw = wb["Targets"].copy()
+        raw = wb["Targets"]
         cols = list(raw.columns)
         # item col
         item_col = None
@@ -350,7 +365,7 @@ def _load_tables(path_str: str, mtime: float) -> Tuple[pd.DataFrame, pd.DataFram
         tg["label"] = tg["mark"] + " [" + tg["target_folder"] + "]"
         tg["mark_len"] = tg["mark"].str.len()
 
-    if ENABLE_PARQUET_SIDECASTE:
+    if ENABLE_PARQUET_SIDECAR:
         try:
             _write_sidecar(meta_p, data_p, targets_p, mtime, ds, tg)
         except Exception:
@@ -367,6 +382,29 @@ def _build_keyword_processor(marks: Tuple[str, ...], folders: Tuple[str, ...]):
     for m, f in zip(marks, folders):
         kp.add_keyword(m, (m, f, len(m)))
     return kp
+
+def _assign_matches_regex(df: pd.DataFrame, targets: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    if df.empty or targets.empty:
+        out["matched_mark"]=out["matched_folder"]=out["matched_label"]=""
+        return out
+
+    t_sorted = targets.sort_values("mark_len", ascending=False)
+    marks = t_sorted["mark"].astype(str).map(re.escape).tolist()
+    pattern = r"(" + "|".join(marks) + r")"
+    s = out["item_name"].fillna("").astype(str)
+    # single pass extract; prefer longest by ordering
+    hit = s.str.extract(pattern, flags=re.IGNORECASE)[0]
+
+    lut = {m.lower(): (m, f) for m, f in zip(t_sorted["mark"], t_sorted["target_folder"])}
+    pair = hit.str.lower().map(lut)
+
+    out["matched_mark"]   = pair.map(lambda x: x[0] if isinstance(x, tuple) else "")
+    out["matched_folder"] = pair.map(lambda x: x[1] if isinstance(x, tuple) else "")
+    out["matched_label"]  = out.apply(
+        lambda r: f'{r["matched_mark"]} [{r["matched_folder"]}]' if r["matched_mark"] else "", axis=1
+    )
+    return out
 
 def _assign_matches(df: pd.DataFrame, targets: pd.DataFrame, mode: str) -> pd.DataFrame:
     if df.empty or targets.empty:
@@ -395,24 +433,15 @@ def _assign_matches(df: pd.DataFrame, targets: pd.DataFrame, mode: str) -> pd.Da
         out["matched_label"]  = out.apply(lambda r: f'{r["matched_mark"]} [{r["matched_folder"]}]' if r["matched_mark"] else "", axis=1)
         return out
 
-    # Slow fallback
-    out = df.copy()
-    s = out["item_name"].fillna("").astype(str)
-    out["matched_mark"] = ""; out["matched_folder"] = ""; out["__mm_len__"] = 0
-    for _, row in targets.sort_values("mark_len", ascending=False).iterrows():
-        mark, folder, mlen = row["mark"], row["target_folder"], row["mark_len"]
-        mask = s.str.contains(re.escape(mark), case=False, na=False) & (mlen >= out["__mm_len__"])
-        out.loc[mask, ["matched_mark","matched_folder","__mm_len__"]] = (mark, folder, mlen)
-    out.drop(columns="__mm_len__", inplace=True)
-    out["matched_label"] = out.apply(lambda r: f'{r["matched_mark"]} [{r["matched_folder"]}]' if r["matched_mark"] else "", axis=1)
-    return out
+    # Contains anywhere (slow) → optimized single-pass regex
+    return _assign_matches_regex(df, targets)
 
 def _split_views_and_reviews(d: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
     if "activity_type_norm" not in d.columns:
-        return d.copy(), d.iloc[0:0].copy()
+        return d, d.iloc[0:0]
     s = d["activity_type_norm"].astype(str)
     is_review = s.str.contains("added", na=False) & s.str.contains("review", na=False)
-    return d[~is_review].copy(), d[is_review].copy()
+    return d[~is_review], d[is_review]
 
 def _build_mark_summary(df_with_matches: pd.DataFrame, targets: pd.DataFrame):
     counts = (df_with_matches[df_with_matches["matched_mark"] != ""]
@@ -438,23 +467,23 @@ def _build_mark_summary(df_with_matches: pd.DataFrame, targets: pd.DataFrame):
 # HEAVY PIPELINE (CACHED)
 # =========================
 @st.cache_data(show_spinner=True)
-def _build_aggregates(path_str: str,
-                      mtime: float,
-                      picked_categories: Tuple[str, ...] | None,
-                      selected_members: Tuple[str, ...],
-                      match_mode: str,
-                      privacy_mode: bool):
-    ds, tg = _load_tables(path_str, mtime)
+def _build_aggregates(
+    ds: pd.DataFrame,
+    tg: pd.DataFrame,
+    picked_categories: Optional[Tuple[str, ...]],
+    selected_members: Tuple[str, ...],
+    match_mode: str,
+    privacy_mode: bool
+):
+    # filter targets first
+    if picked_categories is not None and len(picked_categories) > 0:
+        tg = tg[tg["target_folder"].isin(list(picked_categories))]
 
-    # None = all; [] = none
-    if picked_categories is not None:
-        tg = tg[tg["target_folder"].isin(list(picked_categories))].copy()
+    # filter members once
+    if selected_members:
+        ds = ds[ds["Member"].astype(str).isin(list(selected_members))]
 
-    df = ds.copy()
-    if len(selected_members) > 0:
-        df = df[df["Member"].astype(str).isin(list(selected_members))].copy()
-
-    df_views, df_reviews = _split_views_and_reviews(df)
+    df_views, df_reviews = _split_views_and_reviews(ds)
     df_views_full, _ = _split_views_and_reviews(ds)  # for zero-view (overall)
 
     dfm_views = _assign_matches(df_views, tg, match_mode)
@@ -470,9 +499,7 @@ def _build_aggregates(path_str: str,
     else:
         reviews_summary_all = pd.DataFrame(columns=["matched_mark","matched_folder","review_count","min","max","label"])
 
-    url_lookup = (tg[["label","target_url"]].drop_duplicates() if not tg.empty
-                  else pd.DataFrame(columns=["label","target_url"]))
-
+    url_lookup = tg[["label","target_url"]].drop_duplicates() if not tg.empty else pd.DataFrame(columns=["label","target_url"])
     actual_max = int(summary_all["view_count"].max()) if not summary_all.empty else 0
 
     return dict(
@@ -507,7 +534,6 @@ if st.session_state["_last_project_key"] != project_key:
     st.session_state["viewer_page_size"] = 50
     st.session_state["viewer_metric"] = "Total interactions"
     st.session_state["_last_project_key"] = project_key
-    # (no rerun here; we render title + quick filters)
 
 # =========================
 # PROJECT TITLE DROPDOWN (big + orange)
@@ -532,10 +558,15 @@ with c2:
         st.rerun()
 
 # =========================
-# QUICK FILTERS (Categories pills + Members multiselect)
+# SINGLE LOAD (one source of truth)
 # =========================
 ds_q, tg_q = _load_tables(str(selected_path), mtime)
+url_dict = dict(zip(tg_q["label"], tg_q["target_url"]))  # used everywhere
+total_targets_from_targets = len(tg_q[["label"]].drop_duplicates())
 
+# =========================
+# QUICK FILTERS (Categories pills + Members multiselect)
+# =========================
 with st.container():
     st.markdown('<div class="quick-filters">', unsafe_allow_html=True)
     ql, qr = st.columns([0.62, 0.38])
@@ -549,15 +580,15 @@ with st.container():
 
         b1, b2 = st.columns([0.12, 0.12])
         with b1:
-            if st.button("All", key=f"cats_all::{project_key}", use_container_width=True):
+            if st.button("All", key=_k("cats_all", project_key), use_container_width=True):
                 for c in cats:
-                    st.session_state[f"cat::{project_key}::{c}"] = True
+                    st.session_state[_k("cat", project_key, c)] = True
                 st.session_state["picked_categories"] = None
                 st.rerun()
         with b2:
-            if st.button("None", key=f"cats_none::{project_key}", use_container_width=True):
+            if st.button("None", key=_k("cats_none", project_key), use_container_width=True):
                 for c in cats:
-                    st.session_state[f"cat::{project_key}::{c}"] = False
+                    st.session_state[_k("cat", project_key, c)] = False
                 st.session_state["picked_categories"] = []
                 st.rerun()
 
@@ -566,14 +597,11 @@ with st.container():
         cols = st.columns(cols_count) if cols_count > 0 else []
         for i, cat in enumerate(cats):
             with cols[i % max(len(cols), 1)] if cols else st.container():
-                key = f"cat::{project_key}::{cat}"
+                key = _k("cat", project_key, cat)
                 val = st.checkbox(cat, value=st.session_state.get(key, default_checked[cat]), key=key)
                 if val:
                     checked_now.append(cat)
-        if len(checked_now) == len(cats):
-            st.session_state["picked_categories"] = None
-        else:
-            st.session_state["picked_categories"] = checked_now
+        st.session_state["picked_categories"] = None if len(checked_now) == len(cats) else checked_now
 
     # ---- Members (searchable multiselect) ----
     with qr:
@@ -586,7 +614,7 @@ with st.container():
             options=members,
             default=default_members,
             placeholder="Search members…",
-            key=f"members_ms::{project_key}",
+            key=_k("members_ms", project_key),
             label_visibility="collapsed",
         )
         st.session_state["selected_members"] = sel_members
@@ -609,15 +637,15 @@ def _filters_dialog(files: List[Path], current_idx: int):
         index=min(current_idx, len(files) - 1),
     )
 
-    ds, tg = _load_tables(str(files[sel_idx_local]), files[sel_idx_local].stat().st_mtime)
+    ds_local, tg_local = _load_tables(str(files[sel_idx_local]), files[sel_idx_local].stat().st_mtime)
 
-    cats = sorted(tg["target_folder"].dropna().astype(str).unique().tolist()) if not tg.empty else []
+    cats = sorted(tg_local["target_folder"].dropna().astype(str).unique().tolist()) if not tg_local.empty else []
     prev_cats = st.session_state.get("picked_categories")
     default_cats = (cats[:] if prev_cats is None else [c for c in prev_cats if c in cats])
 
     picked_cats = st.multiselect("Categories", options=cats, default=default_cats, placeholder="All categories")
 
-    members = sorted(ds["Member"].dropna().astype(str).unique().tolist())
+    members = sorted(ds_local["Member"].dropna().astype(str).unique().tolist())
     prev_members = st.session_state.get("selected_members", [])
     default_members = [m for m in prev_members if m in members]
     sel_members = st.multiselect("Members (empty = all)", options=members, default=default_members, placeholder="All members")
@@ -648,7 +676,7 @@ def _filters_dialog(files: List[Path], current_idx: int):
             st.rerun()
 
 # =========================
-# HEAVY LIFT (cached by file+filters)
+# HEAVY LIFT (cached by file+filters) — using single-loaded ds_q/tg_q
 # =========================
 pc_state = st.session_state.get("picked_categories", None)
 picked_categories = (tuple(pc_state) if isinstance(pc_state, (list, tuple)) else None)
@@ -656,12 +684,12 @@ selected_members  = tuple(st.session_state.get("selected_members", []))
 privacy_mode      = bool(st.session_state.get("privacy_mode", False))
 match_mode        = st.session_state["match_mode"]
 
-agg = _build_aggregates(str(selected_path), mtime, picked_categories, selected_members, match_mode, privacy_mode)
+agg = _build_aggregates(ds_q, tg_q, picked_categories, selected_members, match_mode, privacy_mode)
 summary_all         = agg["summary_all"]
 summary_all_full    = agg["summary_all_full"]
 viewers             = agg["viewers"]
 reviews_summary_all = agg["reviews_summary_all"]
-url_lookup          = agg["url_lookup"]
+url_lookup          = agg["url_lookup"]  # still produced; we use url_dict maps now
 actual_max          = agg["actual_max"]
 
 # Initialize slider default once per workbook
@@ -700,17 +728,21 @@ with ctB:
             return df.to_csv(index=False).encode("utf-8")
 
         vmin, vmax = st.session_state["views_slider"]
-        summary_now = summary_all[(summary_all["view_count"] >= vmin) & (summary_all["view_count"] <= vmax)]
+        summary_now = summary_all.loc[(summary_all["view_count"] >= vmin) & (summary_all["view_count"] <= vmax)]
 
-        df_views = summary_now[["label","view_count","min","max"]].merge(url_lookup, on="label", how="left") \
-                    .rename(columns={"label":"Mark [Category]","target_url":"Open Plan"})
-        df_zeros = summary_all[summary_all["view_count"] == 0][["label","view_count","min","max"]] \
-                    .merge(url_lookup, on="label", how="left") \
-                    .rename(columns={"label":"Mark [Category]","target_url":"Open Plan"})
+        # maps instead of merges
+        df_views = summary_now[["label","view_count","min","max"]].copy()
+        df_views["Open Plan"] = df_views["label"].map(url_dict)
+        df_views.rename(columns={"label":"Mark [Category]"}, inplace=True)
+
+        df_zeros = summary_all.loc[summary_all["view_count"] == 0, ["label","view_count","min","max"]].copy()
+        df_zeros["Open Plan"] = df_zeros["label"].map(url_dict)
+        df_zeros.rename(columns={"label":"Mark [Category]"}, inplace=True)
+
         if not reviews_summary_all.empty:
-            df_rev = reviews_summary_all[["label","review_count","min","max"]] \
-                        .merge(url_lookup, on="label", how="left") \
-                        .rename(columns={"label":"Mark [Category]","review_count":"Reviews started","target_url":"Open Plan"})
+            df_rev = reviews_summary_all[["label","review_count","min","max"]].copy()
+            df_rev["Open Plan"] = df_rev["label"].map(url_dict)
+            df_rev.rename(columns={"label":"Mark [Category]","review_count":"Reviews started"}, inplace=True)
         else:
             df_rev = pd.DataFrame(columns=["Mark [Category]","Reviews started","min","max","Open Plan"])
 
@@ -733,10 +765,11 @@ with ctC:
 # =========================
 view_min, view_max = st.slider("Views between", 0, max(actual_max,1),
                                st.session_state["views_slider"], key="views_slider")
-summary = summary_all[(summary_all["view_count"] >= view_min) & (summary_all["view_count"] <= view_max)]
+summary = summary_all.loc[(summary_all["view_count"] >= view_min) & (summary_all["view_count"] <= view_max)]
 
-total_targets = len(url_lookup) if not url_lookup.empty else len(summary_all)
-zero_items   = int((summary_all["view_count"] == 0).sum())
+# KPI source of truth from Targets (not from url_lookup DataFrame)
+total_targets = total_targets_from_targets
+zero_items   = int((summary_all_full["view_count"] == 0).sum())
 found_items  = total_targets - zero_items
 
 mc1, mc2, mc3 = st.columns(3)
@@ -761,7 +794,7 @@ if not summary.empty:
     with col2:
         max_bars = st.number_input("Max bars (0 = all)", min_value=0, max_value=10000, value=0, step=50, key="views_max_bars")
 
-    df_plot = summary.copy()
+    df_plot = summary
     if sort_choice == "Most viewed":
         df_plot = df_plot.sort_values("view_count", ascending=False)
     elif sort_choice == "Least viewed":
@@ -771,7 +804,8 @@ if not summary.empty:
     if max_bars and max_bars > 0:
         df_plot = df_plot.head(int(max_bars))
 
-    df_plot["label_display"] = df_plot["label"].map(lambda s: _display_label(s, privacy_mode))
+    mask_label = (lambda s: _display_label(s, privacy_mode))
+    df_plot = df_plot.assign(label_display=df_plot["label"].map(mask_label))
     fig_views = px.bar(df_plot, x="label_display", y="view_count",
                        labels={"label_display":"Mark [Category]","view_count":"Views"})
     fig_views.update_layout(margin=dict(l=10,r=10,t=10,b=10),
@@ -783,8 +817,8 @@ if not summary.empty:
 # =========================
 if not reviews_summary_all.empty:
     st.markdown('<span class="section-chip">Reviews started — per Mark</span>', unsafe_allow_html=True)
-    rs = reviews_summary_all.sort_values("review_count", ascending=False).copy()
-    rs["label_display"] = rs["label"].map(lambda s: _display_label(s, privacy_mode))
+    rs = reviews_summary_all.sort_values("review_count", ascending=False)
+    rs = rs.assign(label_display=rs["label"].map(lambda s: _display_label(s, privacy_mode)))
     fig_reviews = px.bar(rs, x="label_display", y="review_count",
                          labels={"label_display":"Mark [Category]","review_count":"Reviews started"})
     fig_reviews.update_layout(margin=dict(l=10,r=10,t=10,b=10),
@@ -798,19 +832,19 @@ if not summary.empty:
     st.markdown('<span class="section-chip">Viewers — Ranked (paged)</span>', unsafe_allow_html=True)
 
     allowed = set(summary["label"].tolist())
-    v2 = viewers[viewers["label"].isin(allowed)].copy()
+    v2 = viewers[viewers["label"].isin(allowed)]
 
-    distinct_by_member = v2.groupby("Member")["label"].nunique().rename("distinct_items").reset_index()
-    total_interactions_by_member = v2.groupby("Member")["count"].sum().rename("total_interactions").reset_index()
+    # single pivot for both metrics
+    pivot = pd.pivot_table(v2, index="Member", values="count", aggfunc=["sum", "size"]).reset_index()
+    pivot.columns = ["Member", "total_interactions", "distinct_items"]
 
     metric_choice = st.radio("Metric", ["Distinct plans viewed", "Total interactions"],
                              index=1 if st.session_state["viewer_metric"] == "Total interactions" else 0,
                              horizontal=True, key="viewer_metric")
-    ranked = total_interactions_by_member if metric_choice == "Total interactions" else distinct_by_member
     y_col = "total_interactions" if metric_choice == "Total interactions" else "distinct_items"
     y_title = "Total interactions" if metric_choice == "Total interactions" else "Distinct plans"
 
-    ranked = ranked.sort_values([y_col, "Member"], ascending=[False, True]).reset_index(drop=True)
+    ranked = pivot.sort_values([y_col, "Member"], ascending=[False, True]).reset_index(drop=True)
     ranked["Rank"] = ranked.index + 1
     ranked["Member_display"] = ranked["Member"].map(lambda s: _display_member(s, privacy_mode))
 
@@ -822,7 +856,7 @@ if not summary.empty:
 
     start = (page - 1) * page_size
     end = min(start + page_size, total)
-    current_slice = ranked.iloc[start:end].copy()
+    current_slice = ranked.iloc[start:end]
 
     c1, c2 = st.columns([2,1])
     with c1:
@@ -837,8 +871,8 @@ if not summary.empty:
 
     with c2:
         st.subheader("Plans by views")
-        top10_plans = summary.sort_values("view_count", ascending=False).head(10).copy()
-        bottom10_plans = summary[summary["view_count"] > 0].sort_values("view_count", ascending=True).head(10).copy()
+        top10_plans = summary.sort_values("view_count", ascending=False).head(10)
+        bottom10_plans = summary[summary["view_count"] > 0].sort_values("view_count", ascending=True).head(10)
 
         def _mk_list(df_, title):
             if df_.empty:
@@ -846,8 +880,7 @@ if not summary.empty:
             items = []
             for _, r in df_.iterrows():
                 text = _display_label(r["label"], privacy_mode); vc = int(r["view_count"])
-                match = url_lookup[url_lookup["label"] == r["label"]]
-                url = match["target_url"].iloc[0] if not match.empty else None
+                url = url_dict.get(r["label"])
                 if isinstance(url, str) and url.strip():
                     items.append(f'<li><a href="{url}" target="_blank">{text}</a> — <b>{vc}</b></li>')
                 else:
@@ -861,8 +894,9 @@ if not summary.empty:
 # DETAILS — VIEWS TABLE
 # =========================
 st.markdown('<span class="section-chip">Details — Views</span>', unsafe_allow_html=True)
-display_df = summary[["label","view_count","min","max"]].merge(url_lookup, on="label", how="left") \
-                .rename(columns={"label":"Mark [Category]","target_url":"Open Plan"})
+display_df = summary[["label","view_count","min","max"]].copy()
+display_df["Open Plan"] = display_df["label"].map(url_dict)
+display_df.rename(columns={"label":"Mark [Category]"}, inplace=True)
 display_df["Mark [Category]"] = display_df["Mark [Category]"].map(lambda s: _display_label(s, privacy_mode))
 st.dataframe(display_df, use_container_width=True, hide_index=True,
              column_config={"Open Plan": st.column_config.LinkColumn("Open Plan", display_text="Open")})
@@ -870,16 +904,20 @@ st.dataframe(display_df, use_container_width=True, hide_index=True,
 # =========================
 # ZERO-VIEW (overall; member filter NOT applied)
 # =========================
-zero_summary = summary_all_full[summary_all_full["view_count"] == 0].merge(url_lookup, on="label", how="left")
+zero_summary = summary_all_full.loc[summary_all_full["view_count"] == 0, ["label","matched_folder"]].copy()
+zero_summary["target_url"] = zero_summary["label"].map(url_dict)
+
 st.markdown('<span class="section-chip">Zero-view plans (clickable)</span>', unsafe_allow_html=True)
 if not zero_summary.empty:
     q = st.text_input("Search a zero-view plan", value="")
     linkable = zero_summary if not q.strip() else zero_summary[zero_summary["label"].str.contains(re.escape(q), case=False, na=False)]
+
     def _card(label, folder, url=None):
         text = _display_label(label, privacy_mode)
         if isinstance(url, str) and url.strip():
             return f'<div class="plan-card"><a href="{url}" target="_blank">{text}</a><div class="cat">{folder}</div></div>'
         return f'<div class="plan-card"><span>{text}</span><div class="cat">{folder}</div></div>'
+
     cards = [_card(r["label"], r["matched_folder"], r.get("target_url", None)) for _, r in linkable.sort_values("label").iterrows()]
     st.markdown('<div class="plan-grid">' + "".join(cards) + "</div>", unsafe_allow_html=True)
 else:
