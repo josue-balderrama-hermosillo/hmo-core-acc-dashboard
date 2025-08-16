@@ -331,7 +331,7 @@ def _pseudonym(name: str) -> str:
     return f"User-{h}"
 
 # --------------------- FILTERS DIALOG ---------------------
-@st.experimental_dialog("Filters")
+@st.dialog("Filters")  # <- updated from st.experimental_dialog
 def _filters_dialog(files: List[Path],
                     current_idx: int,
                     current_categories_default: List[str] | None,
@@ -378,7 +378,7 @@ def _filters_dialog(files: List[Path],
             st.session_state["selected_members"] = sel_members
             st.session_state["match_mode"] = match_mode
             st.session_state["privacy_mode"] = privacy
-            st.rerun()
+            st.rerun()  # <- updated from st.experimental_rerun()
     with c2:
         st.button("Close", use_container_width=True)
 
@@ -390,7 +390,7 @@ with controls:
     with colA:
         dark_now = st.toggle("🌙 Dark mode", value=IS_DARK, key="dark_mode", help="Force dark theme on/off")
         if dark_now != IS_DARK:
-            st.experimental_rerun()
+            st.rerun()  # <- updated from st.experimental_rerun()
     with colB:
         if st.button("☰ Filters", key="open_filters_btn"):
             files = _list_projects()
@@ -511,7 +511,6 @@ if not summary.empty:
     st.markdown('<span class="section-chip">Views — Distribution</span>', unsafe_allow_html=True)
     colA, colB = st.columns([1,1])
     sort_options = ["Most viewed", "Least viewed", "Alphabetical"]
-    # Default to Alphabetical as requested
     default_idx = sort_options.index(st.session_state.get("views_sort_choice", "Alphabetical"))
     with colA:
         sort_choice = st.radio("Sort by", sort_options, horizontal=True, index=default_idx, key="views_sort")
@@ -578,7 +577,6 @@ if not summary.empty:
 
         page_size = st.select_slider("Page size", options=[5,10,20,50], value=50, key="viewer_page_size")
         total = len(ranked); total_pages = max(1, math.ceil(total / page_size))
-        # FIRST PAGE by default
         default_page = min(max(1, st.session_state.get("viewer_page_slider", 1)), total_pages)
         page = st.slider("Rank range (page)", 1, total_pages, default_page, key="viewer_page_slider")
 
