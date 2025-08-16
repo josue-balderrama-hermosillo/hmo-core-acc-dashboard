@@ -1,6 +1,7 @@
-# ACC Activity Dashboard — Project Title Dropdown (Hermosillo orange) + Reset-on-change
+# ACC Activity Dashboard — Project Title Dropdown (Hermosillo orange) + Quick Filters + Reset-on-change
 # - Sticky header with logos
 # - Big orange Project selector (works like a title) under header
+# - NEW: Quick Filters right below (Category pills + searchable Members multiselect)
 # - Auto-reset filters when switching projects
 # - Parquet sidecar cache, fast aggregates, CSV exports, print-to-PDF of current view
 # Run:
@@ -112,6 +113,17 @@ button[kind="secondary"] {{ padding: 0.25rem 0.6rem !important; }}
   font-weight:600; font-size:12px; letter-spacing:.02em; margin:6px 0 10px 0;
 }}
 
+.quick-filters {{
+  background:{C['card']}; border:1px solid {C['border']}; border-radius:12px; padding:10px 12px; margin: 4px 0 8px 0;
+  box-shadow:{C['shadow']};
+}}
+.cat-grid {{ display:flex; flex-wrap:wrap; gap:6px; }}
+.cat-pill {{
+  display:inline-flex; align-items:center; gap:6px; padding:6px 10px; border-radius:999px;
+  border:1px solid {C['border']}; background: {C['bg']}; font-size:13px;
+}}
+.cat-pill input {{ transform: scale(1.1); }}
+
 .plan-grid {{ display:grid; grid-template-columns:repeat(auto-fill,minmax(280px,1fr)); gap:8px; margin-top:6px; }}
 .plan-card {{ background:{C['card']}; border:1px solid {C['border']}; border-radius:10px; padding:8px 10px; box-shadow:{C['shadow']}; }}
 .plan-card a {{ color:{PRIMARY}; font-weight:600; text-decoration:none; }}
@@ -168,7 +180,7 @@ def _list_projects() -> List[Path]:
 if "selected_project_index" not in st.session_state:
     st.session_state["selected_project_index"] = 0
 if "picked_categories" not in st.session_state:
-    st.session_state["picked_categories"] = None
+    st.session_state["picked_categories"] = None   # None = All categories
 if "selected_members" not in st.session_state:
     st.session_state["selected_members"] = []
 if "match_mode" not in st.session_state:
@@ -197,10 +209,7 @@ def _derive_mark(text: str) -> str:
     return s
 
 def _pretty_name(p: Path) -> str:
-    """Human-friendly project title: remove ext/date-ish tails; spaces instead of underscores."""
-    s = p.stem
-    s = s.replace("_", " ")
-    # drop obvious timestamp suffixes e.g. 20250811_16.04.36 or - 2025-08-11
+    s = p.stem.replace("_", " ")
     s = re.sub(r"[ _-](20\d{2}[-_.]?\d{2}[-_.]?\d{2})(?:[ _.-]*\d{1,2}[.:]\d{2}(?:[.:]\d{2})?)?$", "", s)
     s = re.sub(r"\s{2,}", " ", s).strip()
     return s or p.stem
@@ -258,10 +267,6 @@ def _read_excel_sheets(path_str: str, mtime: float) -> Dict[str, pd.DataFrame]:
 
 @st.cache_data(show_spinner=False)
 def _load_tables(path_str: str, mtime: float) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Returns (data_source_df, targets_df), with standard column names.
-    Uses disk Parquet sidecars if available & fresh.
-    """
     xlsx = Path(path_str)
     data_p, targets_p, meta_p = _sidecar_paths(xlsx)
 
@@ -271,14 +276,13 @@ def _load_tables(path_str: str, mtime: float) -> Tuple[pd.DataFrame, pd.DataFram
             tg = pd.read_parquet(targets_p)
             return ds, tg
         except Exception:
-            pass  # fall back to Excel
+            pass
 
     wb = _read_excel_sheets(path_str, mtime)
     if "Data Source" not in wb:
         raise RuntimeError("Workbook must contain a sheet named 'Data Source'.")
 
     ds = wb["Data Source"].copy()
-    # normalize
     if "item_name" not in ds.columns and "item_name_file_ext" in ds.columns:
         ds = ds.rename(columns={"item_name_file_ext": "item_name"})
     if "Member" not in ds.columns:
@@ -300,21 +304,16 @@ def _load_tables(path_str: str, mtime: float) -> Tuple[pd.DataFrame, pd.DataFram
         pass
     ds["item_name"] = ds["item_name"].astype(str)
 
-    # Targets
     tg = pd.DataFrame(columns=["target_item","target_folder","target_url","mark","label","mark_len"])
     if "Targets" in wb:
         raw = wb["Targets"].copy()
         cols = list(raw.columns)
-
-        # Item column
         item_col = None
         for c in cols:
             cl = str(c).strip().lower()
             if any(k in cl for k in ["item","name","title","file","document","sheet"]):
                 item_col = c; break
         if item_col is None: item_col = cols[0]
-
-        # Folder column
         folder_col = None
         for cand in ["folder","category","discipline"]:
             for c in cols:
@@ -323,8 +322,6 @@ def _load_tables(path_str: str, mtime: float) -> Tuple[pd.DataFrame, pd.DataFram
             if folder_col is not None: break
         if folder_col is None:
             folder_col = cols[1] if len(cols) >= 2 else None
-
-        # URL column
         url_col = None
         for c in cols:
             cl = str(c).strip().lower()
@@ -389,7 +386,6 @@ def _assign_matches(df: pd.DataFrame, targets: pd.DataFrame, mode: str) -> pd.Da
         out["matched_label"]  = out.apply(lambda r: f'{r["matched_mark"]} [{r["matched_folder"]}]' if r["matched_mark"] else "", axis=1)
         return out
 
-    # Slow fallback: contains anywhere (prefer not to use on huge data)
     out = df.copy()
     s = out["item_name"].fillna("").astype(str)
     out["matched_mark"] = ""; out["matched_folder"] = ""; out["__mm_len__"] = 0
@@ -440,7 +436,8 @@ def _build_aggregates(path_str: str,
                       privacy_mode: bool):
     ds, tg = _load_tables(path_str, mtime)
 
-    if not tg.empty and picked_categories:
+    # IMPORTANT: treat None = all, [] = none
+    if picked_categories is not None:
         tg = tg[tg["target_folder"].isin(list(picked_categories))].copy()
 
     df = ds.copy()
@@ -500,14 +497,12 @@ if st.session_state["_last_project_key"] != project_key:
     st.session_state["viewer_page_size"] = 50
     st.session_state["viewer_metric"] = "Total interactions"
     st.session_state["_last_project_key"] = project_key
-    # (no rerun here; we want to render the dropdown first)
+    # (no rerun here; we want to render the dropdown and quick filters first)
 
 # =========================
-# NEW: PROJECT TITLE DROPDOWN (visible control, big + orange)
+# PROJECT TITLE DROPDOWN (big + orange)
 # =========================
 st.markdown('<div class="project-chooser"><div class="hint">Project</div></div>', unsafe_allow_html=True)
-
-# Marker so CSS can target only THIS selectbox and make it big + orange
 st.markdown('<div class="project-chooser-marker"></div>', unsafe_allow_html=True)
 
 c1, c2, c3 = st.columns([1, 3, 1])
@@ -523,12 +518,82 @@ with c2:
     )
     if pick != sel_idx:
         st.session_state["selected_project_index"] = int(pick)
-        # trigger full reset on next rerun (prevents stale filters)
-        st.session_state["_last_project_key"] = ""
+        st.session_state["_last_project_key"] = ""  # trigger reset
         st.rerun()
 
 # =========================
-# FILTERS DIALOG (still available)
+# NEW — QUICK FILTERS (Categories pills + Members multiselect)
+# =========================
+ds_q, tg_q = _load_tables(str(selected_path), mtime)
+
+with st.container():
+    st.markdown('<div class="quick-filters">', unsafe_allow_html=True)
+    ql, qr = st.columns([0.62, 0.38])
+
+    # ---- Categories as pills (checkboxes) ----
+    with ql:
+        st.caption("Categories")
+        cats = sorted(tg_q["target_folder"].dropna().astype(str).unique().tolist()) if not tg_q.empty else []
+        # Determine defaults: None => all True; list => only those True
+        picked = st.session_state.get("picked_categories")
+        default_checked = {c: True for c in cats} if picked is None else {c: (c in set(picked)) for c in cats}
+
+        # Buttons All / None
+        b1, b2 = st.columns([0.12, 0.12])
+        with b1:
+            if st.button("All", key=f"cats_all::{project_key}", use_container_width=True):
+                for c in cats:
+                    st.session_state[f"cat::{project_key}::{c}"] = True
+                st.session_state["picked_categories"] = None  # None = all
+                st.rerun()
+        with b2:
+            if st.button("None", key=f"cats_none::{project_key}", use_container_width=True):
+                for c in cats:
+                    st.session_state[f"cat::{project_key}::{c}"] = False
+                st.session_state["picked_categories"] = []    # [] = none
+                st.rerun()
+
+        # Pills grid
+        # (We use checkboxes but lightly styled as "pills")
+        checked_now = []
+        # Show up to 6 per row using columns; wrap naturally
+        cols_count = min(6, max(1, len(cats)))
+        cols = st.columns(cols_count) if cols_count > 0 else []
+        for i, cat in enumerate(cats):
+            with cols[i % max(len(cols), 1)] if cols else st.container():
+                key = f"cat::{project_key}::{cat}"
+                val = st.checkbox(cat, value=st.session_state.get(key, default_checked[cat]), key=key)
+                if val:
+                    checked_now.append(cat)
+
+        # Update picked_categories:
+        # - None -> all categories
+        # - []   -> none
+        if len(checked_now) == len(cats):
+            st.session_state["picked_categories"] = None
+        else:
+            st.session_state["picked_categories"] = checked_now
+
+    # ---- Members multiselect (search + checkboxes inside) ----
+    with qr:
+        st.caption("Members")
+        members = sorted(ds_q["Member"].dropna().astype(str).unique().tolist())
+        prev_members = st.session_state.get("selected_members", [])
+        default_members = [m for m in prev_members if m in members]
+        sel_members = st.multiselect(
+            "Pick members (empty = all)",
+            options=members,
+            default=default_members,
+            placeholder="Search members…",
+            key=f"members_ms::{project_key}",
+            label_visibility="collapsed",
+        )
+        st.session_state["selected_members"] = sel_members
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+# =========================
+# FILTERS DIALOG (advanced)
 # =========================
 @st.dialog("Filters")
 def _filters_dialog(files: List[Path], current_idx: int):
@@ -568,12 +633,12 @@ def _filters_dialog(files: List[Path], current_idx: int):
     cL, cR = st.columns(2)
     with cL:
         if st.button("Apply", type="primary", use_container_width=True):
-            # If project changed in dialog, reset on next cycle
             new_key = f"{files[sel_idx_local].resolve()}::{files[sel_idx_local].stat().st_mtime}"
             st.session_state["selected_project_index"] = int(sel_idx_local)
             if st.session_state["_last_project_key"] != new_key:
                 st.session_state["_last_project_key"] = ""  # trigger reset
-            st.session_state["picked_categories"] = picked_cats if picked_cats else None
+            # Respect None vs [] semantics
+            st.session_state["picked_categories"] = (None if (picked_cats is None or len(picked_cats) == len(cats)) else picked_cats)
             st.session_state["selected_members"] = sel_members
             st.session_state["match_mode"] = match_mode
             st.session_state["privacy_mode"] = privacy
@@ -585,8 +650,10 @@ def _filters_dialog(files: List[Path], current_idx: int):
 # =========================
 # HEAVY LIFT (cached by file+filters)
 # =========================
-picked_categories = tuple(st.session_state["picked_categories"] or [])
-selected_members  = tuple(st.session_state["selected_members"] or [])
+# Preserve None vs []:
+pc_state = st.session_state.get("picked_categories", None)
+picked_categories = (tuple(pc_state) if isinstance(pc_state, (list, tuple)) else None)
+selected_members  = tuple(st.session_state.get("selected_members", []))
 privacy_mode      = bool(st.session_state.get("privacy_mode", False))
 match_mode        = st.session_state["match_mode"]
 
@@ -705,7 +772,7 @@ if not summary.empty:
     if max_bars and max_bars > 0:
         df_plot = df_plot.head(int(max_bars))
 
-    df_plot["label_display"] = df_plot["label"].map(lambda s: _display_label(s, privacy_mode))
+    df_plot["label_display"] = df_plot["label"].map(lambda s: _display_label(s, st.session_state.get("privacy_mode", False)))
     fig_views = px.bar(df_plot, x="label_display", y="view_count",
                        labels={"label_display":"Mark [Category]","view_count":"Views"})
     fig_views.update_layout(margin=dict(l=10,r=10,t=10,b=10),
@@ -718,7 +785,7 @@ if not summary.empty:
 if not reviews_summary_all.empty:
     st.markdown('<span class="section-chip">Reviews started — per Mark</span>', unsafe_allow_html=True)
     rs = reviews_summary_all.sort_values("review_count", ascending=False).copy()
-    rs["label_display"] = rs["label"].map(lambda s: _display_label(s, privacy_mode))
+    rs["label_display"] = rs["label"].map(lambda s: _display_label(s, st.session_state.get("privacy_mode", False)))
     fig_reviews = px.bar(rs, x="label_display", y="review_count",
                          labels={"label_display":"Mark [Category]","review_count":"Reviews started"})
     fig_reviews.update_layout(margin=dict(l=10,r=10,t=10,b=10),
@@ -746,7 +813,7 @@ if not summary.empty:
 
     ranked = ranked.sort_values([y_col, "Member"], ascending=[False, True]).reset_index(drop=True)
     ranked["Rank"] = ranked.index + 1
-    ranked["Member_display"] = ranked["Member"].map(lambda s: _display_member(s, privacy_mode))
+    ranked["Member_display"] = ranked["Member"].map(lambda s: _display_member(s, st.session_state.get("privacy_mode", False)))
 
     page_size = st.select_slider("Page size", options=[5,10,20,50],
                                  value=st.session_state["viewer_page_size"], key="viewer_page_size")
@@ -779,7 +846,7 @@ if not summary.empty:
                 st.caption(f"{title}: none"); return
             items = []
             for _, r in df_.iterrows():
-                text = _display_label(r["label"], privacy_mode); vc = int(r["view_count"])
+                text = _display_label(r["label"], st.session_state.get("privacy_mode", False)); vc = int(r["view_count"])
                 match = url_lookup[url_lookup["label"] == r["label"]]
                 url = match["target_url"].iloc[0] if not match.empty else None
                 if isinstance(url, str) and url.strip():
@@ -797,7 +864,7 @@ if not summary.empty:
 st.markdown('<span class="section-chip">Details — Views</span>', unsafe_allow_html=True)
 display_df = summary[["label","view_count","min","max"]].merge(url_lookup, on="label", how="left") \
                 .rename(columns={"label":"Mark [Category]","target_url":"Open Plan"})
-display_df["Mark [Category]"] = display_df["Mark [Category]"].map(lambda s: _display_label(s, privacy_mode))
+display_df["Mark [Category]"] = display_df["Mark [Category]"].map(lambda s: _display_label(s, st.session_state.get("privacy_mode", False)))
 st.dataframe(display_df, use_container_width=True, hide_index=True,
              column_config={"Open Plan": st.column_config.LinkColumn("Open Plan", display_text="Open")})
 
@@ -810,7 +877,7 @@ if not zero_summary.empty:
     q = st.text_input("Search a zero-view plan", value="")
     linkable = zero_summary if not q.strip() else zero_summary[zero_summary["label"].str.contains(re.escape(q), case=False, na=False)]
     def _card(label, folder, url=None):
-        text = _display_label(label, privacy_mode)
+        text = _display_label(label, st.session_state.get("privacy_mode", False))
         if isinstance(url, str) and url.strip():
             return f'<div class="plan-card"><a href="{url}" target="_blank">{text}</a><div class="cat">{folder}</div></div>'
         return f'<div class="plan-card"><span>{text}</span><div class="cat">{folder}</div></div>'
