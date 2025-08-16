@@ -834,19 +834,28 @@ if not summary.empty:
     allowed = set(summary["label"].tolist())
     v2 = viewers[viewers["label"].isin(allowed)]
 
-    # single pivot for both metrics
-    pivot = pd.pivot_table(v2, index="Member", values="count", aggfunc=["sum", "size"]).reset_index()
-    pivot.columns = ["Member", "total_interactions", "distinct_items"]
+       # robust groupby instead of pivot_table
+    ranked = (
+        v2.groupby("Member")
+          .agg(
+              total_interactions=("count", "sum"),
+              distinct_items=("label", "nunique"),
+          )
+          .reset_index()
+    )
 
-    metric_choice = st.radio("Metric", ["Distinct plans viewed", "Total interactions"],
-                             index=1 if st.session_state["viewer_metric"] == "Total interactions" else 0,
-                             horizontal=True, key="viewer_metric")
+    metric_choice = st.radio(
+        "Metric", ["Distinct plans viewed", "Total interactions"],
+        index=1 if st.session_state["viewer_metric"] == "Total interactions" else 0,
+        horizontal=True, key="viewer_metric"
+    )
     y_col = "total_interactions" if metric_choice == "Total interactions" else "distinct_items"
     y_title = "Total interactions" if metric_choice == "Total interactions" else "Distinct plans"
 
-    ranked = pivot.sort_values([y_col, "Member"], ascending=[False, True]).reset_index(drop=True)
+    ranked = ranked.sort_values([y_col, "Member"], ascending=[False, True]).reset_index(drop=True)
     ranked["Rank"] = ranked.index + 1
     ranked["Member_display"] = ranked["Member"].map(lambda s: _display_member(s, privacy_mode))
+
 
     page_size = st.select_slider("Page size", options=[5,10,20,50],
                                  value=st.session_state["viewer_page_size"], key="viewer_page_size")
