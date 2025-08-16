@@ -889,4 +889,3 @@ else:
 st.markdown('<div style="height:22px"></div>', unsafe_allow_html=True)
 st.markdown('<div class="footer-note">Developed by Core Innovation — Hermosillo MTY — 2025</div>', unsafe_allow_html=True)
 st.markdown('<div style="height:10px"></div>', unsafe_allow_html=True)
-```
