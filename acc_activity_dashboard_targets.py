@@ -1,4 +1,4 @@
-# ACC Activity Dashboard — Dark-mode toggle + Top Toolbar (Filters + Export) + Exact Print-to-PDF
+# ACC Activity Dashboard — top toolbar (Filters+Export), fixed dialog Close, print-to-PDF (exact view), footer
 # Run:
 #   pip install -r requirements.txt
 #   streamlit run acc_activity_dashboard_targets.py
@@ -14,7 +14,7 @@ import pandas as pd
 import streamlit as st
 import plotly.express as px
 import plotly.io as pio
-import streamlit.components.v1 as components  # for print-to-PDF (opens browser print dialog)
+import streamlit.components.v1 as components  # for print-to-PDF (open browser print dialog)
 
 # Optional fast keyword engine
 try:
@@ -50,7 +50,7 @@ PRIMARY, ACCENT, BG = C["primary"], C["accent"], C["bg"]
 px.defaults.template = "plotly_dark" if IS_DARK else "plotly_white"
 px.defaults.color_discrete_sequence = [C["accent"], C["accent2"], C["primary"]]
 
-# Tight top padding & style (also force APS logo white in both themes)
+# Tight top padding & style (APS logo always white; print styling included)
 CUSTOM_CSS = f"""
 <style>
 /* Hide Streamlit chrome / extra padding */
@@ -66,17 +66,16 @@ div.block-container {{ padding-top: 0.35rem !important; padding-bottom: 0.8rem; 
   position: sticky; top: 4px; z-index: 1000;
   width:100%; background:{C['primary']}; color:white; padding:12px 16px;
   display:flex; align-items:center; justify-content:space-between; gap:12px;
-  border-radius:12px; box-shadow:{C['shadow']}; margin:0 0 10px 0;
+  border-radius:12px; box-shadow:{C['shadow']}; margin:0 0 8px 0;
 }}
 .header-bar .title {{ font-size:20px; font-weight:700; text-align:center; flex:1 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
 .header-logo {{ height:32px; flex:0 0 auto; }}
-/* ALWAYS show APS logo in white */
-.right-logo {{ filter: invert(1) !important; }}
+.right-logo {{ filter: invert(1) !important; }} /* APS always white */
 
-/* Sticky top toolbar (Dark toggle + Filters + Export) */
+/* Sticky top toolbar (Dark toggle + Filters + Export) — placed right under header */
 .top-controls {{
-  position: sticky; top: 8px; z-index: 1000;
-  display:flex; justify-content:flex-end; gap:8px; margin-bottom: 6px;
+  position: sticky; top: 56px; z-index: 1000;   /* sits right below header */
+  display:flex; justify-content:flex-end; gap:8px; margin: 4px 0 8px 0;
 }}
 button[kind="secondary"] {{ padding: 0.25rem 0.6rem !important; }}
 
@@ -101,6 +100,16 @@ button[kind="secondary"] {{ padding: 0.25rem 0.6rem !important; }}
 
 /* Lists */
 .small-list li {{ margin:4px 0; color:{C['text']}; }}
+
+/* Footer */
+.footer-note {{ text-align:center; color:{C['subtext']}; font-size:12px; opacity:.85; margin-top:12px; }}
+
+/* PRINT: make sure we print exactly what we see */
+@media print {{
+  * {{ -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }}
+  .header-bar, .top-controls {{ position: static !important; box-shadow:none !important; }}
+  body, .stApp {{ background: #ffffff !important; color: #000 !important; }}
+}}
 </style>
 """
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
@@ -142,12 +151,10 @@ if "match_mode" not in st.session_state:
     st.session_state["match_mode"] = "Starts with (fast)"
 if "privacy_mode" not in st.session_state:
     st.session_state["privacy_mode"] = False
-if "mask_csv" not in st.session_state:
-    st.session_state["mask_csv"] = False
 if "views_sort_choice" not in st.session_state:
     st.session_state["views_sort_choice"] = "Alphabetical"
 if "viewer_page_slider" not in st.session_state:
-    st.session_state["viewer_page_slider"] = 1  # first page by default
+    st.session_state["viewer_page_slider"] = 1
 
 # ---------- IO / NORMALIZATION ----------
 @st.cache_data(show_spinner=False)
@@ -298,10 +305,6 @@ def _build_mark_summary(df_with_matches: pd.DataFrame, targets: pd.DataFrame):
     viewers["label"] = viewers["matched_mark"] + " [" + viewers["matched_folder"] + "]"
     return summary, viewers
 
-@st.cache_data
-def _to_csv_bytes(d: pd.DataFrame) -> bytes:
-    return d.to_csv(index=False).encode("utf-8")
-
 def _mask_middle(text: str, keep_left: int = 3, keep_right: int = 2) -> str:
     s = str(text)
     if len(s) <= keep_left + keep_right: return "•"*len(s)
@@ -359,9 +362,10 @@ def _filters_dialog(files: List[Path],
             st.session_state["privacy_mode"] = privacy
             st.rerun()
     with c2:
-        st.button("Close", use_container_width=True)
+        if st.button("Close", use_container_width=True):
+            st.rerun()  # actually closes dialog
 
-# --------------------- LOAD CURRENT SELECTION ---------------------
+# --------------------- LOAD & COMPUTE FIRST (so toolbar exports know current data) ---------------------
 files = _list_projects()
 if not files:
     st.warning(f"No .xlsx files found in {DATA_DIR}. Add workbooks with 'Data Source' & 'Targets'.")
@@ -378,21 +382,21 @@ sheets: Dict[str, pd.DataFrame] = raw
 df_full = _normalize_cleaned_columns(sheets["Data Source"])
 df = df_full.copy()
 
+# Targets (with URL)
 if "Targets" in sheets:
     targets_df = _get_targets_from_sheet_with_url(sheets["Targets"])
 else:
     targets_df = pd.DataFrame(columns=["target_item","target_folder","target_url","mark","label","mark_len"])
 
+# Apply category/member filters (from last session values)
 if not targets_df.empty and st.session_state["picked_categories"]:
     targets_df = targets_df[targets_df["target_folder"].isin(st.session_state["picked_categories"])].copy()
-
 if not df.empty and st.session_state["selected_members"]:
     df = df[df["Member"].astype(str).isin(st.session_state["selected_members"])].copy()
 
 privacy_mode = bool(st.session_state["privacy_mode"])
 match_speed = st.session_state["match_mode"]
 
-# --------------------- MATCH & AGGREGATE ---------------------
 def _split_views_and_reviews(d: pd.DataFrame):
     if "activity_type_norm" not in d.columns:
         return d.copy(), d.iloc[0:0].copy()
@@ -413,41 +417,133 @@ dfm_reviews     = _assign(df_reviews) if not df_reviews.empty else df_reviews
 dfm_views_full  = _assign(df_views_full)
 
 summary_all, viewers = _build_mark_summary(dfm_views, targets_df)
+summary_all_full, _ = _build_mark_summary(dfm_views_full, targets_df)
 if not dfm_reviews.empty:
     reviews_summary_all, _ = _build_mark_summary(dfm_reviews, targets_df)
     reviews_summary_all = reviews_summary_all.rename(columns={"view_count":"review_count"})
 else:
     reviews_summary_all = pd.DataFrame(columns=["matched_mark","matched_folder","review_count","min","max","label"])
 
-summary_all_full, _ = _build_mark_summary(dfm_views_full, targets_df)
-
-def _attach_urls(summary_df: pd.DataFrame, targets: pd.DataFrame) -> pd.DataFrame:
-    if "target_url" not in targets.columns:
-        summary_df["url"] = None; return summary_df
-    m = (targets[["mark","target_folder","target_url"]]
-         .drop_duplicates(subset=["mark","target_folder"])
-         .rename(columns={"mark":"matched_mark","target_folder":"matched_folder"}))
-    return summary_df.merge(m, on=["matched_mark","matched_folder"], how="left").rename(columns={"target_url":"url"})
-
-summary_all         = _attach_urls(summary_all, targets_df)
-reviews_summary_all = _attach_urls(reviews_summary_all, targets_df) if not reviews_summary_all.empty else reviews_summary_all
-summary_all_full    = _attach_urls(summary_all_full, targets_df)
-
-# View-count filter
+# Slider defaults (so top Export popover can compute filtered output right away)
 actual_max = int(summary_all["view_count"].max()) if not summary_all.empty else 0
 slider_max = max(actual_max, 1)
-view_min, view_max = st.slider("Views between", 0, slider_max, (0, actual_max))
-summary = summary_all[(summary_all["view_count"] >= view_min) & (summary_all["view_count"] <= view_max)]
+if "views_slider" not in st.session_state:
+    st.session_state["views_slider"] = (0, actual_max)
 
-# KPIs
+def _filtered_summary(_rng):
+    vmin, vmax = _rng
+    s = summary_all[(summary_all["view_count"] >= vmin) & (summary_all["view_count"] <= vmax)]
+    return s
+
+# ---------- TOP TOOLBAR (dark toggle + filters + export) RIGHT BELOW HEADER ----------
+st.markdown('<div class="top-controls"></div>', unsafe_allow_html=True)
+ctA, ctB, ctC = st.columns([7,1,1], vertical_alignment="center")
+with ctA:
+    dark_now = st.toggle("🌙 Dark mode", value=IS_DARK, key="dark_mode", help="Force dark theme on/off")
+    if dark_now != IS_DARK:
+        st.rerun()
+with ctB:
+    if st.button("☰ Filters", key="open_filters_btn"):
+        _filters_dialog(
+            files=files,
+            current_idx=st.session_state["selected_project_index"],
+            current_categories_default=st.session_state["picked_categories"],
+            current_members_default=st.session_state["selected_members"],
+            current_match=st.session_state["match_mode"],
+            current_privacy=st.session_state["privacy_mode"],
+        )
+with ctC:
+    with st.popover("⬇️ Export", use_container_width=True):
+        st.caption("Exact view:")
+        if st.button("🖨️ Print / Save as PDF", use_container_width=True):
+            # Trigger top-level print (not the iframe) to avoid blank page
+            components.html("""
+                <script>
+                  (function(){
+                    const t = window.top || window.parent || window;
+                    setTimeout(()=>{ try { t.print(); } catch(e) { window.print(); } }, 250);
+                  })();
+                </script>
+            """, height=0)
+        st.divider()
+        st.caption("Downloads (CSV):")
+
+        # Build CSV frames using current filtered range from session state
+        _rng = st.session_state["views_slider"]
+        summary_now = _filtered_summary(_rng)
+
+        display_df_pop = summary_now[["label","view_count","min","max"]].copy()
+        # Attach URL
+        if "target_url" in targets_df.columns:
+            url_map = (targets_df[["mark","target_folder","target_url"]]
+                       .drop_duplicates().rename(columns={"mark":"matched_mark","target_folder":"matched_folder"}))
+            display_df_pop = display_df_pop.merge(url_map, left_on=["label"],
+                                                  right_on=[(summary_all["matched_mark"] + " [" + summary_all["matched_folder"] + "]").name],
+                                                  how="left")
+        display_df_pop = display_df_pop.rename(columns={"label":"Mark [Category]","target_url":"Open Plan"})
+        display_df_pop["Mark [Category]"] = display_df_pop["Mark [Category]"]
+
+        zeros_full_pop = summary_all[summary_all["view_count"] == 0][["label","view_count","min","max"]].copy()
+        if "target_url" in targets_df.columns:
+            url_map2 = (targets_df[["mark","target_folder","target_url"]]
+                       .drop_duplicates().rename(columns={"mark":"matched_mark","target_folder":"matched_folder"}))
+            zeros_full_pop = zeros_full_pop.merge(url_map2, left_on=["label"],
+                                                  right_on=[(summary_all["matched_mark"] + " [" + summary_all["matched_folder"] + "]").name],
+                                                  how="left")
+        zeros_full_pop = zeros_full_pop.rename(columns={"label":"Mark [Category]","target_url":"Open Plan"})
+
+        if not reviews_summary_all.empty:
+            reviews_disp = reviews_summary_all[["label","review_count","min","max"]].copy()
+            if "target_url" in targets_df.columns:
+                url_map3 = (targets_df[["mark","target_folder","target_url"]]
+                            .drop_duplicates().rename(columns={"mark":"matched_mark","target_folder":"matched_folder"}))
+                reviews_disp = reviews_disp.merge(url_map3,
+                                                  left_on=["label"],
+                                                  right_on=[(reviews_summary_all["matched_mark"] + " [" + reviews_summary_all["matched_folder"] + "]").name],
+                                                  how="left")
+            reviews_disp = reviews_disp.rename(columns={"label":"Mark [Category]","review_count":"Reviews started","target_url":"Open Plan"})
+        else:
+            reviews_disp = pd.DataFrame(columns=["Mark [Category]","Reviews started","min","max","Open Plan"])
+
+        mask_exports = st.checkbox("Apply privacy masking", value=False, key="mask_csv")
+
+        @st.cache_data
+        def _csv_bytes(df_export: pd.DataFrame, privacy: bool) -> bytes:
+            def _mask_lbl(lbl: str) -> str:
+                if " [" in lbl and lbl.endswith("]"):
+                    mark = lbl.split(" [",1)[0]; cat = lbl[len(mark)+1:]
+                    return _mask_middle(mark) + cat
+                return _mask_middle(lbl)
+            df = df_export.copy()
+            if privacy and "Mark [Category]" in df.columns:
+                df["Mark [Category]"] = df["Mark [Category]"].map(_mask_lbl)
+            return df.to_csv(index=False).encode("utf-8")
+
+        st.download_button("Views Summary CSV",
+                           data=_csv_bytes(display_df_pop, mask_exports),
+                           file_name="targets_mark_views_summary.csv", mime="text/csv", use_container_width=True)
+
+        st.download_button("Zero-View Targets CSV",
+                           data=_csv_bytes(zeros_full_pop, mask_exports),
+                           file_name="targets_mark_zero_views.csv", mime="text/csv", use_container_width=True)
+
+        if not reviews_disp.empty:
+            st.download_button("Reviews Started CSV",
+                               data=_csv_bytes(reviews_disp, mask_exports),
+                               file_name="targets_mark_reviews_started.csv", mime="text/csv", use_container_width=True)
+
+# --------------------- SLIDER & KPIs (below toolbar) ---------------------
+view_min, view_max = st.slider("Views between", 0, slider_max, st.session_state["views_slider"], key="views_slider")
+summary = _filtered_summary((view_min, view_max))
+
 total_targets = len(targets_df)
 zero_items   = int((summary_all["view_count"] == 0).sum())
 found_items  = total_targets - zero_items
 
-c1, c2, c3 = st.columns(3)
-with c1: st.markdown(f'<div class="metric-card"><div class="metric-label">Total Targets</div><div class="metric-value">{total_targets:,}</div></div>', unsafe_allow_html=True)
-with c2: st.markdown(f'<div class="metric-card"><div class="metric-label">Targets Viewed</div><div class="metric-value">{found_items:,}</div></div>', unsafe_allow_html=True)
-with c3: st.markdown(f'<div class="metric-card"><div class="metric-label">Zero-View Targets</div><div class="metric-value">{zero_items:,}</div></div>', unsafe_allow_html=True)
+mc1, mc2, mc3 = st.columns(3)
+with mc1: st.markdown(f'<div class="metric-card"><div class="metric-label">Total Targets</div><div class="metric-value">{total_targets:,}</div></div>', unsafe_allow_html=True)
+with mc2: st.markdown(f'<div class="metric-card"><div class="metric-label">Targets Viewed</div><div class="metric-value">{found_items:,}</div></div>', unsafe_allow_html=True)
+with mc3: st.markdown(f'<div class="metric-card"><div class="metric-label">Zero-View Targets</div><div class="metric-value">{zero_items:,}</div></div>', unsafe_allow_html=True)
 
 # ----- helpers for display -----
 def _display_label(lbl: str) -> str:
@@ -459,73 +555,6 @@ def _display_label(lbl: str) -> str:
 
 def _display_member(name: str) -> str:
     return _pseudonym(name) if privacy_mode else name
-
-# ====== TOP TOOLBAR (Dark toggle + Filters + Export) ======
-toolbar = st.container()
-with toolbar:
-    st.markdown('<div class="top-controls"></div>', unsafe_allow_html=True)
-    colA, colB, colC = st.columns([7,1,1], vertical_alignment="center")
-    with colA:
-        dark_now = st.toggle("🌙 Dark mode", value=IS_DARK, key="dark_mode", help="Force dark theme on/off")
-        if dark_now != IS_DARK:
-            st.rerun()
-    with colB:
-        if st.button("☰ Filters", key="open_filters_btn"):
-            _filters_dialog(
-                files=files,
-                current_idx=st.session_state["selected_project_index"],
-                current_categories_default=st.session_state["picked_categories"],
-                current_members_default=st.session_state["selected_members"],
-                current_match=st.session_state["match_mode"],
-                current_privacy=st.session_state["privacy_mode"],
-            )
-    with colC:
-        with st.popover("⬇️ Export", use_container_width=True):
-            st.caption("Exact view:")
-            if st.button("🖨️ Print / Save as PDF", use_container_width=True):
-                # Opens the browser's print dialog -> Save as PDF (captures exactly what's on screen)
-                components.html("<script>window.print()</script>", height=0)
-            st.divider()
-            st.caption("Downloads (CSV):")
-
-            # Build CSV frames used in downloads (reuse later too)
-            display_df = summary[["label","view_count","min","max","url"]].rename(
-                columns={"label":"Mark [Category]","url":"Open Plan"}).copy()
-            display_df["Mark [Category]"] = display_df["Mark [Category]"].map(_display_label)
-
-            zeros_full = summary_all[summary_all["view_count"] == 0][["label","view_count","min","max","url"]] \
-                .rename(columns={"label":"Mark [Category]","url":"Open Plan"})
-
-            if not reviews_summary_all.empty:
-                reviews_disp = reviews_summary_all[["label","review_count","min","max","url"]].rename(
-                    columns={"label":"Mark [Category]","review_count":"Reviews started","url":"Open Plan"})
-            else:
-                reviews_disp = pd.DataFrame(columns=["Mark [Category]","Reviews started","min","max","Open Plan"])
-
-            mask_exports = st.checkbox("Apply privacy masking", value=False, key="mask_csv")
-
-            @st.cache_data
-            def _csv_bytes(df_export: pd.DataFrame, privacy: bool) -> bytes:
-                df = df_export.copy()
-                if privacy:
-                    if "Mark [Category]" in df.columns:
-                        df["Mark [Category]"] = df["Mark [Category]"].map(_display_label)
-                    if "Member" in df.columns:
-                        df["Member"] = df["Member"].map(_pseudonym)
-                return df.to_csv(index=False).encode("utf-8")
-
-            st.download_button("Views Summary CSV",
-                               data=_csv_bytes(display_df, mask_exports),
-                               file_name="targets_mark_views_summary.csv", mime="text/csv", use_container_width=True)
-
-            st.download_button("Zero-View Targets CSV",
-                               data=_csv_bytes(zeros_full, mask_exports),
-                               file_name="targets_mark_zero_views.csv", mime="text/csv", use_container_width=True)
-
-            if not reviews_disp.empty:
-                st.download_button("Reviews Started CSV",
-                                   data=_csv_bytes(reviews_disp, mask_exports),
-                                   file_name="targets_mark_reviews_started.csv", mime="text/csv", use_container_width=True)
 
 # ============================
 # Views — Distribution (default: Alphabetical)
@@ -574,7 +603,7 @@ if not reviews_summary_all.empty:
     st.plotly_chart(fig_reviews, use_container_width=True, key="reviews_started")
 
 # ============================
-# Viewers — Ranked (paged)
+# Viewers — Ranked (paged) + lists
 # ============================
 fig_viewers = None
 top10_plans = pd.DataFrame()
@@ -584,7 +613,8 @@ if not summary.empty:
     st.markdown('<span class="section-chip">Viewers — Ranked (paged)</span>', unsafe_allow_html=True)
 
     allowed = set(summary["label"].tolist())
-    v2 = viewers[viewers["label"].isin(allowed)].copy()
+    v2 = _build_mark_summary(dfm_views, targets_df)[1]  # viewers
+    v2 = v2[v2["label"].isin(allowed)].copy()
 
     distinct_by_member = v2.groupby("Member")["label"].nunique().rename("distinct_items").reset_index()
     total_interactions_by_member = v2.groupby("Member")["count"].sum().rename("total_interactions").reset_index()
@@ -647,7 +677,6 @@ if not summary.empty:
 # Details — Views
 # ============================
 st.markdown('<span class="section-chip">Details — Views</span>', unsafe_allow_html=True)
-# display_df already built in Export popover (rebuild here too in case popover wasn't opened)
 display_df = summary[["label","view_count","min","max","url"]].rename(
     columns={"label":"Mark [Category]","url":"Open Plan"}).copy()
 display_df["Mark [Category]"] = display_df["Mark [Category]"].map(_display_label)
@@ -663,7 +692,7 @@ if not zero_summary.empty:
     q = st.text_input("Search a zero-view plan", value="")
     linkable = zero_summary.copy()
     if q.strip(): linkable = linkable[linkable["label"].str.contains(re.escape(q), case=False, na=False)]
-    def _card(label, folder, url):
+    def _card(label, folder, url=None):
         text = _display_label(label)
         if isinstance(url, str) and url.strip():
             return f'<div class="plan-card"><a href="{url}" target="_blank">{text}</a><div class="cat">{folder}</div></div>'
@@ -672,3 +701,8 @@ if not zero_summary.empty:
     st.markdown('<div class="plan-grid">' + "".join(cards) + "</div>", unsafe_allow_html=True)
 else:
     st.success("Great! No zero-view plans for the selected categories.")
+
+# ---- Footer spacer + note ----
+st.markdown('<div style="height:22px"></div>', unsafe_allow_html=True)
+st.markdown('<div class="footer-note">Developed by Core Innovation — Hermosillo MTY — 2025</div>', unsafe_allow_html=True)
+st.markdown('<div style="height:10px"></div>', unsafe_allow_html=True)
