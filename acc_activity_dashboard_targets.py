@@ -1,6 +1,3 @@
-Here’s the **full updated app** (`acc_activity_dashboard_targets.py`) with the wider white quick-filters card and the **bigger Hermosillo-orange project title dropdown** (bold white text). Everything else stays the same (fast caching, exports, reviews chart, viewer rankings, zero-view cards, etc.).
-
-```python
 # ACC Activity Dashboard — Big Orange Project Title + Wide Quick Filters + Reset-on-change
 # Run:
 #   pip install -r requirements.txt
