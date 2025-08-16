@@ -1,7 +1,7 @@
-# ACC Activity Dashboard — Performance build + sanitized Filters dialog defaults
+# ACC Activity Dashboard — Performance build + sanitized Filters + RESET ON PROJECT CHANGE
 # - Disk sidecar cache (Parquet) for Excel sheets
 # - Aggressive Streamlit caching keyed by (file path, mtime, categories, members, match mode)
-# - Single-pass compute; slider only filters cached aggregates
+# - Auto-reset filters when switching projects (prevents stale filters)
 # - Export popover (CSV + exact Print/Save as PDF); Export left of Filters
 # Run:
 #   pip install -r requirements.txt
@@ -144,6 +144,7 @@ def _list_projects() -> List[Path]:
     DATA_DIR.mkdir(exist_ok=True)
     return sorted(DATA_DIR.glob("*.xlsx"))
 
+# Defaults
 if "selected_project_index" not in st.session_state:
     st.session_state["selected_project_index"] = 0
 if "picked_categories" not in st.session_state:
@@ -156,8 +157,14 @@ if "views_sort_choice" not in st.session_state:
     st.session_state["views_sort_choice"] = "Alphabetical"
 if "viewer_page_slider" not in st.session_state:
     st.session_state["viewer_page_slider"] = 1
+if "viewer_page_size" not in st.session_state:
+    st.session_state["viewer_page_size"] = 50
+if "viewer_metric" not in st.session_state:
+    st.session_state["viewer_metric"] = "Total interactions"
 if "views_slider" not in st.session_state:
     st.session_state["views_slider"] = (0, 0)
+if "_last_project_key" not in st.session_state:
+    st.session_state["_last_project_key"] = ""
 
 # =========================
 # HELPERS
@@ -217,7 +224,6 @@ def _sidecars_fresh(meta_p: Path, mtime: float) -> bool:
 @st.cache_data(show_spinner=False)
 def _read_excel_sheets(path_str: str, mtime: float) -> Dict[str, pd.DataFrame]:
     p = Path(path_str)
-    # Use BytesIO to avoid re-reading from disk twice and for openpyxl bytes support
     wb = pd.read_excel(BytesIO(p.read_bytes()), engine="openpyxl", sheet_name=None)
     return wb
 
@@ -403,17 +409,11 @@ def _build_aggregates(path_str: str,
                       selected_members: Tuple[str, ...],
                       match_mode: str,
                       privacy_mode: bool):
-    """
-    Returns dict with:
-      data: summary_all, summary_all_full, viewers, reviews_summary_all, url_lookup, actual_max
-    """
     ds, tg = _load_tables(path_str, mtime)
 
-    # filter by target categories
     if not tg.empty and picked_categories:
         tg = tg[tg["target_folder"].isin(list(picked_categories))].copy()
 
-    # filter members
     df = ds.copy()
     if len(selected_members) > 0:
         df = df[df["Member"].astype(str).isin(list(selected_members))].copy()
@@ -460,6 +460,20 @@ sel_idx = min(st.session_state["selected_project_index"], len(files)-1)
 selected_path = files[sel_idx]
 mtime = selected_path.stat().st_mtime
 
+# ====== NEW: Reset filters when project changes ======
+project_key = f"{selected_path.resolve()}::{mtime}"
+if st.session_state["_last_project_key"] != project_key:
+    # reset everything that can stale across projects
+    st.session_state["picked_categories"] = None
+    st.session_state["selected_members"] = []
+    st.session_state["views_slider"] = (0, 0)           # will be set to (0, actual_max) after compute
+    st.session_state["views_sort_choice"] = "Alphabetical"
+    st.session_state["viewer_page_slider"] = 1
+    st.session_state["viewer_page_size"] = 50
+    st.session_state["viewer_metric"] = "Total interactions"
+    st.session_state["_last_project_key"] = project_key
+    st.rerun()
+
 # =========================
 # FILTERS DIALOG (sanitized defaults)
 # =========================
@@ -478,12 +492,10 @@ def _filters_dialog(files: List[Path], current_idx: int):
         index=min(current_idx, len(files) - 1),
     )
 
-    # Load tables for the selected workbook (fast because of sidecar cache)
     ds, tg = _load_tables(str(files[sel_idx]), files[sel_idx].stat().st_mtime)
 
-    # ---- Categories (sanitize defaults) ----
     cats = sorted(tg["target_folder"].dropna().astype(str).unique().tolist()) if not tg.empty else []
-    prev_cats = st.session_state.get("picked_categories")  # None or list[str]
+    prev_cats = st.session_state.get("picked_categories")
     if prev_cats is None:
         default_cats = cats[:]  # all
     else:
@@ -496,7 +508,6 @@ def _filters_dialog(files: List[Path], current_idx: int):
         placeholder="All categories",
     )
 
-    # ---- Members (sanitize defaults) ----
     members = sorted(ds["Member"].dropna().astype(str).unique().tolist())
     prev_members = st.session_state.get("selected_members", [])
     default_members = [m for m in prev_members if m in members]
@@ -508,7 +519,6 @@ def _filters_dialog(files: List[Path], current_idx: int):
         placeholder="All members",
     )
 
-    # ---- Other options ----
     match_mode = st.selectbox(
         "Matching mode",
         ["Starts with (fast)", "Keyword search (fast, needs FlashText)", "Contains anywhere (slow)"],
@@ -525,7 +535,14 @@ def _filters_dialog(files: List[Path], current_idx: int):
     c1, c2 = st.columns(2)
     with c1:
         if st.button("Apply", type="primary", use_container_width=True):
-            st.session_state["selected_project_index"] = int(sel_idx)
+            # If the user also switched project in the dialog, force a reset on next run
+            new_key = f"{files[sel_idx].resolve()}::{files[sel_idx].stat().st_mtime}"
+            if st.session_state["_last_project_key"] != new_key:
+                st.session_state["selected_project_index"] = int(sel_idx)
+                st.session_state["_last_project_key"] = ""  # trigger reset in top-level section
+            else:
+                st.session_state["selected_project_index"] = int(sel_idx)
+
             st.session_state["picked_categories"] = picked_cats if picked_cats else None  # None = all
             st.session_state["selected_members"] = sel_members
             st.session_state["match_mode"] = match_mode
@@ -551,7 +568,7 @@ reviews_summary_all = agg["reviews_summary_all"]
 url_lookup          = agg["url_lookup"]
 actual_max          = agg["actual_max"]
 
-# Initialize slider default once per workbook
+# Initialize slider default once per workbook (after compute)
 if st.session_state["views_slider"] == (0, 0):
     st.session_state["views_slider"] = (0, actual_max)
 
@@ -589,7 +606,6 @@ with ctB:
         vmin, vmax = st.session_state["views_slider"]
         summary_now = summary_all[(summary_all["view_count"] >= vmin) & (summary_all["view_count"] <= vmax)]
 
-        # Build CSVs
         df_views = summary_now[["label","view_count","min","max"]].merge(url_lookup, on="label", how="left") \
                     .rename(columns={"label":"Mark [Category]","target_url":"Open Plan"})
         df_zeros = summary_all[summary_all["view_count"] == 0][["label","view_count","min","max"]] \
@@ -692,7 +708,8 @@ if not summary.empty:
     total_interactions_by_member = v2.groupby("Member")["count"].sum().rename("total_interactions").reset_index()
 
     metric_choice = st.radio("Metric", ["Distinct plans viewed", "Total interactions"],
-                             index=1, horizontal=True, key="viewer_metric")
+                             index=1 if st.session_state["viewer_metric"] == "Total interactions" else 0,
+                             horizontal=True, key="viewer_metric")
     ranked = total_interactions_by_member if metric_choice == "Total interactions" else distinct_by_member
     y_col = "total_interactions" if metric_choice == "Total interactions" else "distinct_items"
     y_title = "Total interactions" if metric_choice == "Total interactions" else "Distinct plans"
@@ -701,7 +718,8 @@ if not summary.empty:
     ranked["Rank"] = ranked.index + 1
     ranked["Member_display"] = ranked["Member"].map(lambda s: _display_member(s, privacy_mode))
 
-    page_size = st.select_slider("Page size", options=[5,10,20,50], value=50, key="viewer_page_size")
+    page_size = st.select_slider("Page size", options=[5,10,20,50],
+                                 value=st.session_state["viewer_page_size"], key="viewer_page_size")
     total = len(ranked); total_pages = max(1, math.ceil(total / page_size))
     default_page = min(max(1, st.session_state.get("viewer_page_slider", 1)), total_pages)
     page = st.slider("Rank range (page)", 1, total_pages, default_page, key="viewer_page_slider")
